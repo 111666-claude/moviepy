@@ -8,7 +8,10 @@ from PIL import Image
 import pytest
 
 from moviepy import *
-from moviepy.video.compositing.CompositeVideoClip import concatenate_videoclips
+from moviepy.video.compositing.CompositeVideoClip import (
+    CompositeVideoClip,
+    concatenate_videoclips,
+)
 from moviepy.video.io.ffmpeg_writer import ffmpeg_write_image, ffmpeg_write_video
 from moviepy.video.io.gif_writers import write_gif_with_imageio
 from moviepy.video.tools.drawing import color_gradient
@@ -231,3 +234,29 @@ def test_write_gif(util, clip_class, loop, with_mask):
     assert r == 0
     assert g == 0
     assert b == 255
+
+
+def test_write_transparent_video(util):
+    """Writing a clip with a mask must preserve it in the output file."""
+    clip = ColorClip((100, 100), (255, 0, 0, 76.5)).with_duration(2)
+    clip2 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(2)
+    composite = CompositeVideoClip(
+        [clip, clip2.with_position("center")], bg_color=None
+    ).with_fps(5)
+
+    filename = os.path.join(util.TMP_DIR, "moviepy_transparent_video.webm")
+    if os.path.isfile(filename):
+        os.remove(filename)
+
+    ffmpeg_write_video(composite, filename, codec="libvpx", fps=5, logger=None)
+
+    result = VideoFileClip(filename, has_mask=True)
+    try:
+        assert result.mask is not None
+
+        mask = result.mask.get_frame(0)
+        # Allow a tolerance of about 1% to account for compression and rounding
+        assert abs(mask[10, 10] - 0.3) < 0.01
+        assert abs(mask[25, 25] - 0.51) < 0.01
+    finally:
+        result.close()

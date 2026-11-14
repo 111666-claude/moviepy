@@ -247,5 +247,207 @@ def test_slide_out():
             assert n_reds == n_reds_expected
 
 
+def test_compositing_masks(util):
+    """Mask composition must accumulate transparency multiplicatively."""
+    # Has one R 30%, one G 30%, one B 30%
+    clip1 = ColorClip((100, 100), (255, 0, 0, 76.5)).with_duration(2)
+    clip2 = ColorClip((50, 50), (0, 255, 0, 76.5)).with_duration(2)
+    clip3 = ColorClip((25, 25), (0, 0, 255, 76.5)).with_duration(2)
+
+    compostite_clip1 = CompositeVideoClip(
+        [clip1, clip2.with_position(("center", "center"))],
+        bg_color=None,
+    )
+    compostite_clip2 = CompositeVideoClip(
+        [compostite_clip1, clip3.with_position(("center", "center"))],
+        bg_color=None,
+    )
+
+    frame = compostite_clip2.mask.get_frame(1)
+
+    # We check opacity with one, two and three layers
+    # Allow for a bit of tolerance (about 1%) to account for rounding errors
+    opacity1 = frame[50, 10]
+    opacity2 = frame[50, 30]
+    opacity3 = frame[50, 50]
+    assert abs(opacity1 - 0.3) < 0.01
+    assert abs(opacity2 - 0.51) < 0.01
+    assert abs(opacity3 - 0.657) < 0.01
+
+
+def test_compositing_with_transparency_colors(util):
+    """Colors and masks must both be preserved through nested compositions."""
+    # Has one R 30%, one G 30%, one B 30%
+    clip1 = ColorClip((100, 100), (255, 0, 0, 76.5)).with_duration(2)
+    clip2 = ColorClip((50, 50), (0, 255, 0, 76.5)).with_duration(2)
+    clip3 = ColorClip((25, 25), (0, 0, 255, 76.5)).with_duration(2)
+
+    compostite_clip1 = CompositeVideoClip(
+        [clip1, clip2.with_position(("center", "center"))],
+        bg_color=None,  # No background color, so it should be transparent
+    )
+    compostite_clip2 = CompositeVideoClip(
+        [compostite_clip1, clip3.with_position(("center", "center"))],
+        bg_color=None,
+    )
+
+    frame = compostite_clip2.get_frame(1)
+    mask = compostite_clip2.mask.get_frame(1)
+
+    # We check color with 1 layer
+    # We add a bit of tolerance (about 1%) to account for rounding errors
+    color1 = frame[50, 10]
+    opacity1 = mask[50, 10]
+    assert np.allclose(color1, [255, 0, 0], rtol=0.01)
+    assert abs(opacity1 - 0.3) < 0.01
+
+    # With 2 layers
+    color2 = frame[50, 30]
+    opacity2 = mask[50, 30]
+    assert np.allclose(color2, [105, 150, 0], rtol=0.01)
+    assert abs(opacity2 - 0.51) < 0.01
+
+    # With 3 layers
+    color3 = frame[50, 50]
+    opacity3 = mask[50, 50]
+    assert np.allclose(color3, [57, 82, 116], atol=1)
+    assert abs(opacity3 - 0.657) < 0.01
+
+
+def test_compositing_nested_transparency(util):
+    """A transparent composite nested in another one keeps its opacity.
+
+    Two nested composites must not pre-multiply their colors against the
+    transparent background: the flat colors and the accumulated mask must be
+    preserved, and the opaque background must stay fully opaque.
+    """
+    clip1 = ColorClip((200, 200), (255, 0, 0)).with_duration(3)
+    clip2 = ColorClip((100, 100), (0, 255, 0, 76.5)).with_duration(3)
+    clip3 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(3)
+
+    inner = CompositeVideoClip(
+        [clip1, clip2.with_position(("center", "center"))],
+        bg_color=None,
+    )
+    outer = CompositeVideoClip(
+        [inner, clip3.with_position(("center", "center"))],
+        bg_color=None,
+    )
+
+    frame = outer.get_frame(2)
+    mask = outer.mask.get_frame(2)
+
+    # The opaque red background keeps the whole composite opaque.
+    assert np.array_equal(mask[100, 10], 1.0)
+
+    assert np.allclose(frame[100, 10], [255, 0, 0], rtol=0.01)
+    assert np.allclose(frame[100, 60], [179, 76, 0], rtol=0.01)
+    assert np.allclose(frame[100, 100], [126, 53, 76], rtol=0.01)
+
+
+def test_compositing_many_transparent_layers():
+    """Many stacked semi-transparent layers must not swallow each other."""
+    clip = ColorClip((128, 128), (10, 20, 30, 25.5)).with_duration(1)
+    composite = CompositeVideoClip(
+        [clip.with_position("center") for _ in range(32)],
+        size=(128, 128),
+        bg_color=None,
+    )
+
+    mask = composite.mask.get_frame(0.5)
+    assert abs(mask[64, 64] - 0.965663) < 1e-4
+
+
+def test_compositing_transparent_moving_position():
+    """Mask and color composition must follow a moving clip position."""
+    clip1 = ColorClip((200, 200), (255, 0, 0)).with_duration(3)
+    clip2 = ColorClip((100, 100), (0, 255, 0, 76.5)).with_duration(3)
+    clip3 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(3)
+
+    inner = CompositeVideoClip(
+        [clip2.with_position("center"), clip3.with_position("center")],
+        size=(100, 100),
+        bg_color=None,
+    )
+    position = lambda t: (int(50 + t * 20), int(50 + t * 20))
+    composite = CompositeVideoClip(
+        [clip1, inner.with_position(position)],
+        size=(200, 200),
+        bg_color=None,
+    )
+
+    frame = composite.get_frame(2)
+    mask = composite.mask.get_frame(2)
+
+    # At t=2 the inner composite starts at (90, 90).
+    assert np.allclose(frame[60, 60], [255, 0, 0], rtol=0.01)
+    assert np.allclose(frame[100, 100], [179, 76, 0], rtol=0.01)
+    assert np.allclose(frame[140, 140], [125, 54, 76], atol=1)
+    assert np.array_equal(mask[90:150, 90:150], np.ones((60, 60)))
+
+
+def test_compositing_transparent_crop_consistency():
+    """Cropping a transparent composite keeps frame and mask aligned."""
+    clip1 = ColorClip((100, 100), (255, 0, 0, 76.5)).with_duration(2)
+    clip2 = ColorClip((50, 50), (0, 255, 0, 76.5)).with_duration(2)
+
+    composite = CompositeVideoClip(
+        [clip1, clip2.with_position("center")], bg_color=None
+    ).with_effects([vfx.Crop(x1=10, y1=10, x2=90, y2=90)])
+
+    frame = composite.get_frame(1)
+    mask = composite.mask.get_frame(1)
+
+    assert frame.shape == (80, 80, 3)
+    assert mask.shape == (80, 80)
+    assert abs(mask[0, 0] - 0.3) < 0.01
+    assert abs(mask[40, 40] - 0.51) < 0.01
+    assert np.allclose(frame[40, 40], [105, 150, 0], rtol=0.01)
+
+
+def test_compositing_transparent_export_consistency(util):
+    """Exported nested/moving/cropped frames must match the composite."""
+    clip1 = ColorClip((200, 200), (255, 0, 0)).with_duration(2)
+    clip2 = ColorClip((100, 100), (0, 255, 0, 76.5)).with_duration(2)
+    clip3 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(2)
+
+    inner = CompositeVideoClip(
+        [clip2.with_position("center"), clip3.with_position("center")],
+        size=(100, 100),
+        bg_color=None,
+    )
+    composite = CompositeVideoClip(
+        [clip1, inner.with_position(lambda t: (int(50 + t * 10), int(50 + t * 10)))],
+        size=(200, 200),
+        bg_color=None,
+    ).with_fps(5)
+
+    for name, clip in (
+        ("nested", composite),
+        ("cropped", composite.with_effects([vfx.Crop(x1=40, y1=40, x2=160, y2=160)])),
+    ):
+        filename = os.path.join(util.TMP_DIR, f"transparent_{name}.mov")
+        if os.path.isfile(filename):
+            os.remove(filename)
+
+        clip.write_videofile(filename, codec="prores", fps=5, logger=None, audio=False)
+
+        exported = VideoFileClip(filename, has_mask=True)
+        try:
+            for t in (0.2, 0.6):
+                expected_frame = clip.get_frame(t)
+                expected_mask = clip.mask.get_frame(t)
+                frame = exported.get_frame(t)
+                mask = exported.mask.get_frame(t)
+
+                assert frame.shape == expected_frame.shape
+                assert mask.shape == expected_mask.shape
+                # ProRes is lossy, so allow one level of rounding per channel.
+                assert np.abs(frame.astype(int) - expected_frame.astype(int)).max() <= 1
+                assert np.abs(mask - expected_mask).max() <= 0.01
+        finally:
+            exported.close()
+
+
 if __name__ == "__main__":
     pytest.main()

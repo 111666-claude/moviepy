@@ -10,6 +10,10 @@ def blit(im1, im2, pos=None, mask=None):
 
     Blits ``im1`` on ``im2`` as position ``pos=(x,y)``, using the
     ``mask`` if provided.
+
+    Note: this is a low-level Pillow ``paste`` helper. It does not perform
+    proper alpha compositing, so prefer ``VideoClip.compose_on`` for combining
+    clips with transparency.
     """
     if pos is None:
         pos = (0, 0)  # pragma: no cover

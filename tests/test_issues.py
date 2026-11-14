@@ -2,6 +2,8 @@
 
 import os
 
+import numpy as np
+
 import pytest
 
 from moviepy import *
@@ -358,6 +360,91 @@ def test_issue_1682_2(util):
     clip = clip.with_section_cut_out(10, 17)
     output_audio_filepath = os.path.join(util.TMP_DIR, "rain_cutout.mp3")
     clip.write_audiofile(output_audio_filepath)
+
+
+def test_issue_2269(util):
+    """Nesting a transparent composite must not darken it."""
+    filename = "media/big_buck_bunny_0_30.webm"
+    clip = VideoFileClip(filename).subclipped(0, 3)
+    color_clip = ColorClip((500, 200), (255, 0, 0, 255)).with_duration(3)
+    txt_clip_with_margin = TextClip(
+        text="Hello",
+        font=util.FONT,
+        font_size=72,
+        stroke_color="white",
+        stroke_width=10,
+        margin=(10, 5, 0, 0),
+        text_align="center",
+    ).with_duration(3)
+
+    comp1 = CompositeVideoClip(
+        [color_clip, txt_clip_with_margin.with_position(("center", "center"))],
+        bg_color=None,  # No background color, so it should be transparent
+    )
+    comp2 = CompositeVideoClip(
+        [clip, comp1.with_position(("center", "center"))],
+        bg_color=None,  # No background color, so it should be transparent
+    )
+
+    # If transparency works as expected, this pixel should be pure red at 2s
+    frame = comp2.get_frame(2)
+    pixel = frame[334, 625]
+
+    # We add a bit of tolerance (about 1%) to account for rounding errors
+    assert np.allclose(pixel, [255, 0, 0], rtol=0.01)
+
+
+def test_issue_2269_2(util):
+    """Colors must be preserved through two nested transparent composites."""
+    clip1 = ColorClip((200, 200), (255, 0, 0)).with_duration(3)
+    clip2 = ColorClip((100, 100), (0, 255, 0, 76.5)).with_duration(3)
+    clip3 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(3)
+
+    compostite_clip1 = CompositeVideoClip(
+        [clip1, clip2.with_position(("center", "center"))],
+        bg_color=None,
+    )
+    compostite_clip2 = CompositeVideoClip(
+        [compostite_clip1, clip3.with_position(("center", "center"))],
+        bg_color=None,
+    )
+
+    # If transparency works as expected the clip should match those colors
+    frame = compostite_clip2.get_frame(2)
+    pixel1 = frame[100, 10]
+    pixel2 = frame[100, 60]
+    pixel3 = frame[100, 100]
+
+    # We add a bit of tolerance (about 1%) to account for rounding errors
+    assert np.allclose(pixel1, [255, 0, 0], rtol=0.01)
+    assert np.allclose(pixel2, [179, 76, 0], rtol=0.01)
+    assert np.allclose(pixel3, [126, 53, 76], rtol=0.01)
+
+
+def test_issue_2269_3(util):
+    """Masks of nested transparent composites must accumulate correctly."""
+    clip1 = ColorClip((200, 200), (255, 0, 0, 76.5)).with_duration(3)
+    clip2 = ColorClip((100, 100), (0, 255, 0, 76.5)).with_duration(3)
+    clip3 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(3)
+
+    compostite_clip1 = CompositeVideoClip(
+        [clip1, clip2.with_position(("center", "center"))],
+        bg_color=None,
+    )
+    compostite_clip2 = CompositeVideoClip(
+        [compostite_clip1, clip3.with_position(("center", "center"))],
+        bg_color=None,
+    )
+
+    frame = compostite_clip2.mask.get_frame(2)
+    pixel1 = frame[100, 10]
+    pixel2 = frame[100, 60]
+    pixel3 = frame[100, 100]
+
+    # Opacity for one, two and three stacked layers, within about 1%
+    assert abs(pixel1 - 0.3) < 0.01
+    assert abs(pixel2 - 0.51) < 0.01
+    assert abs(pixel3 - 0.657) < 0.01
 
 
 if __name__ == "__main__":

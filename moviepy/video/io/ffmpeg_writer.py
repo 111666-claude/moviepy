@@ -95,8 +95,8 @@ class FFMPEG_VideoWriter:
         self.filename = filename
         self.codec = codec
         self.ext = self.filename.split(".")[-1]
-        if not pixel_format:  # pragma: no cover
-            pixel_format = "rgba" if with_mask else "rgb24"
+
+        input_pixel_format = "rgba" if with_mask else "rgb24"
 
         # order is important
         cmd = [
@@ -111,7 +111,7 @@ class FFMPEG_VideoWriter:
             "-s",
             "%dx%d" % (size[0], size[1]),
             "-pix_fmt",
-            pixel_format,
+            input_pixel_format,
             "-r",
             "%.02f" % fps,
             "-an",
@@ -129,8 +129,20 @@ class FFMPEG_VideoWriter:
         if threads is not None:
             cmd.extend(["-threads", str(threads)])
 
-        if (codec == "libx264") and (size[0] % 2 == 0) and (size[1] % 2 == 0):
-            cmd.extend(["-pix_fmt", "yuv420p"])
+        # Disable auto alt ref for transparent webm and set pixel format to
+        # yuva420p, as it is the only alpha format supported by libvpx.
+        if codec == "libvpx" and with_mask:
+            cmd.extend(["-pix_fmt", "yuva420p"])
+            cmd.extend(["-auto-alt-ref", "0"])
+        elif (codec == "libx264") and (size[0] % 2 == 0) and (size[1] % 2 == 0):
+            cmd.extend(["-pix_fmt", "yuva420p"])
+        else:
+            # For all other codecs, we use the pixel format specified by the
+            # user or the one matching the input (with alpha if a mask was
+            # provided).
+            if not pixel_format:
+                pixel_format = input_pixel_format
+            cmd.extend(["-pix_fmt", pixel_format])
         cmd.extend([filename])
 
         popen_params = cross_platform_popen_params(
@@ -238,8 +250,9 @@ def ffmpeg_write_video(
     else:
         logfile = None
     logger(message="MoviePy - Writing video %s\n" % filename)
-    if not pixel_format:
-        pixel_format = "rgba" if clip.mask is not None else "rgb24"
+
+    has_mask = clip.mask is not None
+
     with FFMPEG_VideoWriter(
         filename,
         clip.size,
@@ -247,6 +260,7 @@ def ffmpeg_write_video(
         codec=codec,
         preset=preset,
         bitrate=bitrate,
+        with_mask=has_mask,
         logfile=logfile,
         audiofile=audiofile,
         threads=threads,

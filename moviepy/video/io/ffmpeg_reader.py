@@ -98,6 +98,19 @@ class FFMPEG_VideoReader:
         else:
             i_arg = ["-i", self.filename]
 
+        # For webm video (vp8 and vp9) with a transparent layer, force
+        # libvpx/libvpx-vp9 as ffmpeg, because the native webm decoders don't
+        # decode the alpha layer.
+        # (see
+        # https://www.reddit.com/r/ffmpeg/comments/fgpyfb/help_with_webm_with_alpha_channel/
+        # )
+        if self.depth == 4:
+            codec_name = self.infos.get("video_codec_name")
+            if codec_name == "vp9":
+                i_arg = ["-c:v", "libvpx-vp9"] + i_arg
+            elif codec_name == "vp8":
+                i_arg = ["-c:v", "libvpx"] + i_arg
+
         cmd = (
             [FFMPEG_BINARY]
             + i_arg
@@ -696,6 +709,19 @@ class FFmpegInfosParser:
             global_data["video_bitrate"] = stream_data.get("bitrate", None)
         if self._current_stream["default"] or "video_fps" not in self.result:
             global_data["video_fps"] = stream_data["fps"]
+
+        # Try to extract video codec and profile
+        main_info_match = re.search(
+            r"Video:\s(\w+)?\s?(\([^)]+\))?",
+            line.lstrip(),
+        )
+        if main_info_match is not None:
+            codec_name, profile = main_info_match.groups()
+            stream_data["codec_name"] = codec_name
+            stream_data["profile"] = profile
+
+        if self._current_stream["default"] or "video_codec_name" not in self.result:
+            global_data["video_codec_name"] = stream_data.get("codec_name", None)
 
         return (global_data, stream_data)
 

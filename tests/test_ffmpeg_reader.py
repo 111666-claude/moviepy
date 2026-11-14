@@ -10,7 +10,10 @@ import pytest
 
 from moviepy.audio.AudioClip import AudioClip
 from moviepy.config import FFMPEG_BINARY
-from moviepy.video.compositing.CompositeVideoClip import clips_array
+from moviepy.video.compositing.CompositeVideoClip import (
+    CompositeVideoClip,
+    clips_array,
+)
 from moviepy.video.io.ffmpeg_reader import (
     FFMPEG_VideoReader,
     FFmpegInfosParser,
@@ -487,6 +490,19 @@ def test_not_default_audio_stream_audio_bitrate():
     assert d["audio_bitrate"] == 139
 
 
+def test_video_codec_name():
+    """The video codec name is parsed so transparent webm can be decoded."""
+    infos = """Input #0, matroska,webm, from 'clip.webm':
+  Duration: 00:00:01.00, start: 0.000000, bitrate: 10 kb/s
+  Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 100x100, 5 fps, 5 tbr, 1k tbn
+    Metadata:
+      alpha_mode      : 1
+At least one output file must be specified"""
+
+    d = FFmpegInfosParser(infos, "clip.webm").parse()
+    assert d["video_codec_name"] == "vp9"
+
+
 def test_stream_deidentation_not_raises_error():
     """Test libavformat reduced streams identation to 2 spaces.
 
@@ -676,6 +692,36 @@ def test_seeking_beyond_file_end():
         end_of_file_frame = reader.get_frame(30)
     assert np.array_equal(frame_1, end_of_file_frame)
     assert reader.pos == 30 * 24 + 1
+
+
+def test_read_transparent_video(util):
+    """Alpha of a transparent webm must be read back as a mask."""
+    filename = os.path.join(util.TMP_DIR, "moviepy_read_transparent_video.webm")
+    if os.path.isfile(filename):
+        os.remove(filename)
+
+    clip = ColorClip((100, 100), (255, 0, 0, 76.5)).with_duration(1).with_fps(5)
+    clip2 = ColorClip((50, 50), (0, 0, 255, 76.5)).with_duration(1).with_fps(5)
+    composite = CompositeVideoClip(
+        [clip, clip2.with_position("center")], bg_color=None
+    ).with_fps(5)
+    composite.write_videofile(filename, codec="libvpx", fps=5, logger=None, audio=False)
+
+    reader = FFMPEG_VideoReader(filename, pixel_format="rgba")
+    try:
+        mask = reader.get_frame(0)[:, :, 3]
+        # Allow for compression error; fully red corners and stacked center
+        assert abs(mask[10, 10] / 255 - 0.3) < 0.01
+        assert abs(mask[25, 25] / 255 - 0.51) < 0.01
+    finally:
+        reader.close()
+
+    video = VideoFileClip(filename, has_mask=True)
+    try:
+        assert video.mask is not None
+        assert abs(video.mask.get_frame(0)[10, 10] - 0.3) < 0.01
+    finally:
+        video.close()
 
 
 def test_release_of_file_via_close(util):
