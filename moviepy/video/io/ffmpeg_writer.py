@@ -180,8 +180,13 @@ class FFMPEG_VideoWriter:
 
     def write_frame(self, img_array):
         """Writes one frame in the file."""
+        # ffmpeg expects the raw frame bytes in C order, so a non-contiguous
+        # array must be copied before being sent to its stdin.
+        if not img_array.flags["C_CONTIGUOUS"]:
+            img_array = img_array.copy(order="C")
+
         try:
-            self.proc.stdin.write(img_array.tobytes())
+            self.proc.stdin.write(img_array.data)
         except IOError as err:
             _, ffmpeg_error = self.proc.communicate()
             if ffmpeg_error is not None:

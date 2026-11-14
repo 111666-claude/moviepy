@@ -3,6 +3,7 @@
 import multiprocessing
 import os
 
+import numpy as np
 from PIL import Image
 
 import pytest
@@ -259,3 +260,39 @@ def test_write_file_with_spaces(util):
     filename = os.path.join(util.TMP_DIR, "name with spaces.mp4")
     clip = ColorClip((1, 1), color=1, is_mask=True).with_fps(1).with_duration(0.3)
     ffmpeg_write_video(clip, filename, fps=1)
+
+
+def test_write_frame_non_contiguous_matches_contiguous(util):
+    """A non-contiguous frame must be written with the same bytes (hence
+    layout) as its contiguous equivalent, i.e. row order is preserved.
+    """
+    size = (32, 32)
+    color = (10, 120, 200)
+    fps = 5
+
+    contiguous_clip = ColorClip(size, color=color, duration=0.4).with_fps(fps)
+
+    def non_contiguous_frame(t):
+        # A strided view over a wider array: not C-contiguous in memory,
+        # but the pixels are identical to the contiguous clip's frame.
+        wide = np.zeros((size[1], size[0] * 2, 3), dtype=np.uint8)
+        wide[:, ::2] = contiguous_clip.get_frame(t)
+        frame = wide[:, ::2]
+        assert not frame.flags["C_CONTIGUOUS"]
+        return frame
+
+    non_contiguous_clip = VideoClip(
+        frame_function=non_contiguous_frame, duration=0.4
+    ).with_fps(fps)
+
+    contiguous_file = os.path.join(util.TMP_DIR, "writer_contiguous.avi")
+    non_contiguous_file = os.path.join(util.TMP_DIR, "writer_non_contiguous.avi")
+
+    # rawvideo keeps the written frames lossless, so the files can be compared
+    # byte per byte.
+    ffmpeg_write_video(contiguous_clip, contiguous_file, fps, codec="rawvideo")
+    ffmpeg_write_video(non_contiguous_clip, non_contiguous_file, fps, codec="rawvideo")
+
+    assert os.path.getsize(contiguous_file) == os.path.getsize(non_contiguous_file)
+    with open(contiguous_file, "rb") as f1, open(non_contiguous_file, "rb") as f2:
+        assert f1.read() == f2.read()

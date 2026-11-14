@@ -168,15 +168,15 @@ class CompositeVideoClip(VideoClip):
         for clip in self.playing_clips(t):
             current_img = clip.compose_on(current_img, t)
 
-        # Turn Pillow image into a numpy array
-        frame = np.array(current_img)
+        # Turn Pillow image into a numpy array.
+        # If frame have transparency, remove it, our mask will take care of
+        # it during rendering. Pillow's RGB conversion copies only the color
+        # bands and returns C-contiguous memory, which is what the video
+        # writer expects.
+        if current_img.mode == "RGBA":
+            return np.array(current_img.convert("RGB"))
 
-        # If frame have transparency, remove it
-        # our mask will take care of it during rendering
-        if frame.shape[2] == 4:
-            return frame[:, :, :3]
-
-        return frame
+        return np.array(current_img)
 
     def playing_clips(self, t=0):
         """Returns a list of the clips in the composite clips that are

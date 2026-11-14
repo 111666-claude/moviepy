@@ -769,6 +769,14 @@ class VideoClip(Clip):
         pos = self.pos(ct)
         pos = compute_position(clip_img.size, background.size, pos, self.relative_pos)
 
+        # Fast path: an opaque RGB background only needs the clip's region to
+        # be blended. Giving the clip's alpha layer to pillow paste yields the
+        # exact same pixels as converting the whole background to RGBA and
+        # alpha compositing a full-size canvas, which is much slower.
+        if background.mode == "RGB" and clip_img.mode[-1] == "A":
+            background.paste(clip_img, pos, mask=clip_img)
+            return background
+
         # If neither background nor clip have alpha layer (check if mode end
         # with A), we can juste use pillow paste
         if clip_img.mode[-1] != "A" and background.mode[-1] != "A":

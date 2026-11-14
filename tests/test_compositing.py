@@ -3,10 +3,48 @@
 import os
 
 import numpy as np
+from PIL import Image
 
 import pytest
 
 from moviepy import *
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
+
+
+# Common setup for the HUD-heavy compositing tests below: 12 semi-transparent
+# 96x96 overlays on a 256x256 frame, rendered over 120 frames.
+HUD_GRID_SIZE = (256, 256)
+HUD_COUNT = 12
+HUD_SIZE = (96, 96)
+HUD_ALPHA = 128
+HUD_FRAMES = 120
+HUD_FPS = 30
+# Sum of all pixels of the final frame (R+G+B) for the HUD layout below.
+HUD_EXPECTED_FRAME_PIXEL_SUM = 26771616
+
+
+def hud_clips():
+    """Build the 12 semi-transparent overlays used by the HUD tests."""
+    overlays = []
+    for i in range(HUD_COUNT):
+        clip = ColorClip(HUD_SIZE, color=(255, 255, 255, HUD_ALPHA))
+        pos = (
+            (i * 37) % (HUD_GRID_SIZE[0] - HUD_SIZE[0]),
+            (i * 53) % (HUD_GRID_SIZE[1] - HUD_SIZE[1]),
+        )
+        overlays.append(clip.with_position(pos))
+    return overlays
+
+
+def opaque_composite():
+    """A 256x256 opaque black background with the HUD overlays on top."""
+    bg = ColorClip(HUD_GRID_SIZE, color=(0, 0, 0))
+    return CompositeVideoClip([bg] + hud_clips(), use_bgclip=True)
+
+
+def transparent_composite():
+    """A transparent 256x256 canvas with the HUD overlays on top."""
+    return CompositeVideoClip(hud_clips(), size=HUD_GRID_SIZE)
 
 
 class ClipPixelTest:
@@ -308,6 +346,112 @@ def test_concatenate_with_masks(util):
     concatenate_videoclips([video_without_mask, video_with_mask]).write_videofile(
         output
     )
+
+
+def reference_composite_rgb(background_rgba, overlays):
+    """Slow, straightforward Pillow reference compositing of `overlays`
+    over a full-size RGBA `background_rgba`, returning the RGB picture.
+
+    This is the full-size alpha-compositing path that the optimized opaque
+    background path must remain pixel-identical to.
+    """
+    background = np.array(background_rgba.convert("RGBA"))
+    for overlay_rgba, pos in overlays:
+        before = Image.fromarray(background)
+        canvas = Image.new("RGBA", before.size, (0, 0, 0, 0))
+        canvas.paste(overlay_rgba, pos)
+        background = np.array(Image.alpha_composite(before, canvas))
+    return background[:, :, :3].copy()
+
+
+def reference_overlays():
+    """RGBA images and positions matching the HUD overlays of `hud_clips`."""
+    overlays = []
+    for i in range(HUD_COUNT):
+        array = np.full(HUD_SIZE[::-1] + (4,), 255, dtype=np.uint8)
+        array[..., 3] = HUD_ALPHA
+        pos = (
+            (i * 37) % (HUD_GRID_SIZE[0] - HUD_SIZE[0]),
+            (i * 53) % (HUD_GRID_SIZE[1] - HUD_SIZE[1]),
+        )
+        overlays.append((Image.fromarray(array), pos))
+    return overlays
+
+
+def test_hud_batch_opaque_background_matches_reference():
+    """120 frames of 12 semi-transparent HUDs over an opaque background must
+    stay pixel-identical to full alpha compositing, in contiguous memory.
+    """
+    clip = opaque_composite()
+    overlays = reference_overlays()
+    background = Image.new("RGBA", HUD_GRID_SIZE, (0, 0, 0, 255))
+    expected = reference_composite_rgb(background, overlays)
+
+    for i in range(HUD_FRAMES):
+        frame = clip.get_frame(i / HUD_FPS)
+        assert frame.shape == (HUD_GRID_SIZE[1], HUD_GRID_SIZE[0], 3)
+        assert frame.dtype == np.uint8
+        assert frame.flags["C_CONTIGUOUS"]
+        assert int(frame.astype(np.int64).sum()) == HUD_EXPECTED_FRAME_PIXEL_SUM
+        assert np.array_equal(frame, expected)
+
+
+def test_hud_batch_opaque_bg_color_matches_reference():
+    """Same as above when the opaque background is a ``bg_color``."""
+    clip = CompositeVideoClip(hud_clips(), size=HUD_GRID_SIZE, bg_color=(0, 0, 0))
+    overlays = reference_overlays()
+    background = Image.new("RGBA", HUD_GRID_SIZE, (0, 0, 0, 255))
+    expected = reference_composite_rgb(background, overlays)
+
+    for i in range(HUD_FRAMES):
+        frame = clip.get_frame(i / HUD_FPS)
+        assert frame.flags["C_CONTIGUOUS"]
+        assert int(frame.astype(np.int64).sum()) == HUD_EXPECTED_FRAME_PIXEL_SUM
+        assert np.array_equal(frame, expected)
+
+
+def test_hud_batch_transparent_background_stays_transparent():
+    """120 frames over a transparent background keep their colors, masks and
+    contiguity; the composite must not become opaque.
+    """
+    clip = transparent_composite()
+    assert clip.mask is not None
+
+    overlays = reference_overlays()
+    background = Image.new("RGBA", HUD_GRID_SIZE, (0, 0, 0, 0))
+    expected = reference_composite_rgb(background, overlays)
+
+    for i in range(HUD_FRAMES):
+        t = i / HUD_FPS
+        frame = clip.get_frame(t)
+        mask = clip.mask.get_frame(t)
+
+        assert frame.shape == (HUD_GRID_SIZE[1], HUD_GRID_SIZE[0], 3)
+        assert frame.dtype == np.uint8
+        assert frame.flags["C_CONTIGUOUS"]
+        assert mask.shape == (HUD_GRID_SIZE[1], HUD_GRID_SIZE[0])
+        assert np.array_equal(frame, expected)
+
+    # Transparency is preserved: an uncovered corner stays fully transparent
+    # while a pixel under a single overlay is only partially opaque.
+    mask = clip.mask.get_frame(0)
+    assert mask[-1, -1] == 0
+    assert 0 < mask[HUD_SIZE[1] // 2, HUD_SIZE[0] // 2] < 1
+
+
+def test_hud_batch_export(util):
+    """Both background kinds export through the regular video writer."""
+    opaque_file = os.path.join(util.TMP_DIR, "test_hud_batch_opaque.mp4")
+    transparent_file = os.path.join(util.TMP_DIR, "test_hud_batch_transparent.mp4")
+
+    for clip, path in (
+        (opaque_composite(), opaque_file),
+        (transparent_composite(), transparent_file),
+    ):
+        clip.with_duration(HUD_FRAMES / HUD_FPS).with_fps(HUD_FPS).write_videofile(
+            path, codec="libx264", preset="ultrafast", logger=None
+        )
+        assert os.path.isfile(path)
 
 
 if __name__ == "__main__":
