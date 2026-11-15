@@ -9,6 +9,7 @@ from moviepy.audio.fx.AudioLoop import AudioLoop
 from moviepy.audio.fx.AudioNormalize import AudioNormalize
 from moviepy.audio.fx.MultiplyStereoVolume import MultiplyStereoVolume
 from moviepy.audio.fx.MultiplyVolume import MultiplyVolume
+from moviepy.audio.fx.SidechainGain import SidechainGain
 
 
 __all__ = (
@@ -19,4 +20,5 @@ __all__ = (
     "AudioNormalize",
     "MultiplyStereoVolume",
     "MultiplyVolume",
+    "SidechainGain",
 )

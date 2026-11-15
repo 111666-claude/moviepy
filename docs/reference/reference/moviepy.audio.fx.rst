@@ -54,3 +54,6 @@ moviepy.audio.fx
    moviepy.audio.fx.MultiplyVolume
 
 
+   moviepy.audio.fx.SidechainGain
+
+

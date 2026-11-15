@@ -1571,5 +1571,341 @@ def test_audio_fadeout(
         assert round(subclip_max_volume, 4) == 1
 
 
+def test_sidechain_gain_parameters_validation():
+    trigger = AudioArrayClip(np.zeros((100, 1)), fps=1000)
+
+    afx.SidechainGain(trigger)  # all defaults are valid
+
+    with pytest.raises(ValueError):
+        afx.SidechainGain(trigger, threshold=2)
+    with pytest.raises(ValueError):
+        afx.SidechainGain(trigger, target_gain=-0.1)
+    with pytest.raises(ValueError):
+        afx.SidechainGain(trigger, attack_time=-1)
+    with pytest.raises(ValueError):
+        afx.SidechainGain(trigger, release_time=-1)
+    with pytest.raises(ValueError):
+        afx.SidechainGain(trigger, block_size=0)
+    with pytest.raises(TypeError):
+        afx.SidechainGain(np.zeros(10))
+
+
+def _pulse_trigger(fps, n_samples, active_windows):
+    """Build a deterministic trigger made of rectangular pulses."""
+    array = np.zeros((n_samples, 1))
+    for start, end in active_windows:
+        array[int(start * fps) : int(end * fps)] = 0.9
+    return AudioArrayClip(array, fps=fps)
+
+
+def test_sidechain_gain_gain_bounds_on_pulses():
+    """Point-wise verification on synthetic pulses: the gain envelope always
+    stays within [target_gain, 1], reaches the configured boundaries and moves
+    monotonically during attack and release phases.
+    """
+    fps = 2000
+    n_samples = 8000
+    target = AudioArrayClip(np.ones((n_samples, 1)), fps=fps)
+    trigger = _pulse_trigger(fps, n_samples, [(0.5, 1.0), (1.5, 2.5)])
+
+    target_gain = 0.2
+    ducked = target.with_effects(
+        [
+            afx.SidechainGain(
+                trigger,
+                threshold=0.1,
+                target_gain=target_gain,
+                attack_time=0.05,
+                release_time=0.1,
+            )
+        ]
+    )
+    gains = ducked.to_soundarray(fps=fps)[:, 0]
+
+    # the envelope is a pure gain: output equals the unit input times the gain
+    assert gains.shape == (n_samples,)
+    # hard boundaries, point by point
+    assert np.all(gains >= target_gain - 1e-12)
+    assert np.all(gains <= 1.0 + 1e-12)
+
+    # before the first pulse the target is untouched
+    assert gains[0] == 1.0
+    assert np.all(gains[: int(0.45 * fps)] == 1.0)
+
+    # inside a long enough pulse the gain converges to target_gain
+    assert abs(gains[int(0.95 * fps)] - target_gain) < 1e-3
+
+    # attack: monotonic decrease; release: monotonic increase
+    attack_segment = gains[int(0.5 * fps) : int(0.7 * fps)]
+    assert np.all(np.diff(attack_segment) <= 1e-15)
+    release_segment = gains[int(1.0 * fps) : int(1.4 * fps)]
+    assert np.all(np.diff(release_segment) >= -1e-15)
+
+    # fully recovered well after the last pulse
+    assert abs(gains[int(3.5 * fps)] - 1.0) < 1e-3
+
+
+def test_sidechain_gain_instant_attack_release():
+    """With zero time constants the gain switches instantly but stays
+    exactly aligned on the trigger windows, no samples in between.
+    """
+    fps = 1000
+    target = AudioArrayClip(np.ones((1000, 1)), fps=fps)
+    trigger = _pulse_trigger(fps, 1000, [(0.2, 0.6)])
+
+    ducked = target.with_effects(
+        [
+            afx.SidechainGain(
+                trigger,
+                threshold=0.1,
+                target_gain=0.0,
+                attack_time=0,
+                release_time=0,
+            )
+        ]
+    )
+    gains = ducked.to_soundarray(fps=fps)[:, 0]
+    assert np.all(gains[: int(0.2 * fps)] == 1.0)
+    assert np.all(gains[int(0.2 * fps) : int(0.6 * fps)] == 0.0)
+    assert np.all(gains[int(0.6 * fps) :] == 1.0)
+
+
+def test_sidechain_gain_silence_and_short_pauses_do_not_jump():
+    """A silent trigger never changes the gain and a short pause between two
+    pulses only lets the envelope glide slightly upwards, without any jump.
+    """
+    fps = 1000
+    target = AudioArrayClip(np.ones((1000, 1)), fps=fps)
+
+    silent_trigger = AudioArrayClip(np.zeros((1000, 1)), fps=fps)
+    untouched = target.with_effects(
+        [
+            afx.SidechainGain(
+                silent_trigger,
+                threshold=0.1,
+                target_gain=0.0,
+                attack_time=0,
+                release_time=0,
+            )
+        ]
+    )
+    assert np.all(untouched.to_soundarray(fps=fps) == 1.0)
+
+    # two pulses separated by a 20 ms gap, slow release (0.2 s time constant)
+    gapped_trigger = _pulse_trigger(fps, 1000, [(0.2, 0.4), (0.42, 0.6)])
+    ducked = target.with_effects(
+        [
+            afx.SidechainGain(
+                gapped_trigger,
+                threshold=0.1,
+                target_gain=0.2,
+                attack_time=0.02,
+                release_time=0.2,
+            )
+        ]
+    )
+    gains = ducked.to_soundarray(fps=fps)[:, 0]
+
+    gap = gains[int(0.4 * fps) : int(0.42 * fps)]
+    # smooth release movement only, never a jump back towards unity
+    assert np.all(np.diff(gap) >= -1e-15)
+    assert gap.max() < 0.5
+    # no sample-to-sample pop anywhere in the envelope
+    assert np.all(np.abs(np.diff(gains)) < 0.1)
+
+
+def test_sidechain_gain_time_alignment_with_offsets():
+    """The trigger must be interpreted on the composition clock: a trigger
+    starting at 0.3 s ducks the target 0.3 s later even though its own samples
+    start at 0.
+    """
+    fps = 1000
+    target = AudioArrayClip(np.ones((1000, 1)), fps=fps)
+    # trigger is loud locally between 0.1 s and 0.3 s, starts at 0.3 s
+    trigger = _pulse_trigger(fps, 400, [(0.1, 0.3)]).with_start(0.3)
+
+    ducked = target.with_effects(
+        [
+            afx.SidechainGain(
+                trigger,
+                threshold=0.1,
+                target_gain=0.0,
+                attack_time=0,
+                release_time=0,
+            )
+        ]
+    )
+    gains = ducked.to_soundarray(fps=fps)[:, 0]
+    # active window on the composition clock is [0.4 s, 0.6 s)
+    assert gains[int(0.399 * fps)] == 1.0
+    assert np.all(gains[int(0.4 * fps) : int(0.6 * fps)] == 0.0)
+    assert gains[int(0.6 * fps)] == 1.0
+
+
+def test_sidechain_gain_handles_channels_and_sample_rates():
+    """Mono/stereo combinations and mismatched trigger sample rates must
+    render with the target shape and stay time aligned.
+    """
+    fps = 1000
+    mono_target = AudioArrayClip(np.ones((1000, 1)), fps=fps)
+    stereo_target = AudioArrayClip(np.ones((1000, 2)), fps=fps)
+
+    # stereo target driven by a mono trigger: both channels duck together
+    mono_trigger = _pulse_trigger(fps, 1000, [(0.2, 0.7)])
+    out = stereo_target.with_effects(
+        [afx.SidechainGain(mono_trigger, target_gain=0.25)]
+    ).to_soundarray(fps=fps)
+    assert out.shape == (1000, 2)
+    assert np.allclose(out[:, 0], out[:, 1])
+    assert out[int(0.5 * fps), 0] < 0.3
+
+    # mono target driven by a stereo trigger at a different sample rate
+    hi_res_trigger_array = np.zeros((4000, 2))
+    hi_res_trigger_array[int(0.2 * 4000) : int(0.7 * 4000)] = 0.9
+    hi_res_trigger = AudioArrayClip(hi_res_trigger_array, fps=4000)
+    out = mono_target.with_effects(
+        [
+            afx.SidechainGain(
+                hi_res_trigger,
+                threshold=0.1,
+                target_gain=0.2,
+                attack_time=0.01,
+                release_time=0.01,
+            )
+        ]
+    ).to_soundarray(fps=fps)
+    assert out.shape[0] == 1000
+    # ducking happens at the same composition times despite the rate mismatch
+    assert out[int(0.1 * fps), 0] > 0.99
+    assert out[int(0.5 * fps), 0] < 0.3
+
+    # a trigger shorter than the target simply stops driving the envelope
+    short_trigger = _pulse_trigger(fps, 200, [(0.0, 0.2)])
+    out = mono_target.with_effects(
+        [
+            afx.SidechainGain(
+                short_trigger,
+                target_gain=0.1,
+                attack_time=0.02,
+                release_time=0.05,
+            )
+        ]
+    ).get_frame(np.arange(1000) / fps)
+    # at 0.5 s the release (tau = 0.05 s) has had 0.3 s to recover
+    assert abs(out[500, 0] - 1.0) < 1e-2
+
+
+def test_sidechain_gain_random_and_sequential_frames_match():
+    """Frame accesses in random order, scalar queries and sequential chunked
+    rendering must all produce the exact same envelope values.
+    """
+    fps = 1000
+    target = AudioArrayClip(np.full((1000, 1), 0.5), fps=fps)
+    trigger = _pulse_trigger(fps, 1000, [(0.2, 0.4), (0.6, 0.85)])
+    ducked = target.with_effects(
+        [
+            afx.SidechainGain(
+                trigger,
+                threshold=0.1,
+                target_gain=0.2,
+                attack_time=0.03,
+                release_time=0.08,
+                block_size=64,
+            )
+        ]
+    )
+
+    sequential = ducked.to_soundarray(fps=fps)
+    times = np.arange(1000) / fps
+
+    random_order = np.random.default_rng(42).permutation(1000)
+    random_frames = ducked.get_frame(times[random_order])
+    np.testing.assert_array_equal(random_frames, sequential[random_order])
+
+    # scalar queries return one frame; compare every channel against the render
+    for sample_index in range(0, 1000, 37):
+        scalar_frame = ducked.get_frame(times[sample_index])
+        np.testing.assert_array_equal(
+            scalar_frame, sequential[sample_index, : scalar_frame.shape[-1]]
+        )
+
+    # chunked rendering (the export path) matches the full render exactly
+    chunks = list(ducked.iter_chunks(chunksize=123, fps=fps))
+    stitched = np.vstack(chunks)
+    np.testing.assert_array_equal(stitched, sequential[: len(stitched)])
+
+
+def test_sidechain_gain_does_not_load_whole_trigger():
+    """The trigger is read in batches no larger than block_size and the effect
+    keeps working when frames are requested backwards and forwards.
+    """
+    fps = 1000
+    block_size = 50
+
+    class BatchRecordingClip(AudioClip):
+        def __init__(self):
+            super().__init__(duration=1.0, fps=fps)
+            self.nchannels = 1
+            self.batch_sizes = []
+
+            def frame_function(t):
+                if isinstance(t, np.ndarray):
+                    self.batch_sizes.append(len(t))
+                    frame = np.zeros((len(t), 1))
+                    frame[(t >= 0.2) & (t < 0.7)] = 0.9
+                    return frame
+                self.batch_sizes.append(1)
+                return np.array([0.9 if 0.2 <= t < 0.7 else 0.0])
+
+            self.frame_function = frame_function
+
+    target = AudioArrayClip(np.ones((1000, 1)), fps=fps)
+    trigger = BatchRecordingClip()
+    ducked = target.with_effects([afx.SidechainGain(trigger, block_size=block_size)])
+
+    # jump backwards/forwards across the whole timeline
+    for t in (0.9, 0.05, 0.5, 0.25, 0.95, 0.1):
+        ducked.get_frame(t)
+    ducked.to_soundarray(fps=fps)
+
+    assert trigger.batch_sizes  # the trigger was actually used
+    assert max(trigger.batch_sizes) <= block_size
+
+
+def test_sidechain_gain_composes_with_other_fx_and_exports(util):
+    """The returned clip remains a composable, exportable AudioClip and the
+    pre-existing mixing/volume effects keep behaving as before around it.
+    """
+    fps = 1000
+    music = AudioArrayClip(np.full((1000, 1), 0.5), fps=fps).with_end(1.0)
+    voice = _pulse_trigger(fps, 1000, [(0.2, 0.7)]).with_end(1.0)
+
+    chained = music.with_effects(
+        [
+            afx.MultiplyVolume(0.8),
+            afx.SidechainGain(
+                voice,
+                threshold=0.1,
+                target_gain=0.1,
+                attack_time=0.01,
+                release_time=0.05,
+            ),
+            afx.MultiplyVolume(2),
+        ]
+    )
+    rendered = chained.to_soundarray(fps=fps)
+    assert rendered.shape == (1000, 2)
+    assert np.isfinite(rendered).all()
+    # fixed factors compose as 0.8 * 2 = 1.6 outside the ducked region
+    assert abs(rendered[50, 0] - 0.8) < 1e-9
+
+    ducked_music = music.with_effects([afx.SidechainGain(voice)])
+    composition = CompositeAudioClip([ducked_music, voice])
+    assert composition.duration == 1.0
+    filename = os.path.join(util.TMP_DIR, "sidechain_gain.wav")
+    composition.write_audiofile(filename, fps=fps, logger=None)
+    assert os.path.getsize(filename) > 0
+
+
 if __name__ == "__main__":
     pytest.main()

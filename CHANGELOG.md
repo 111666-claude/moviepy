@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `afx.SidechainGain` effect: sidechain ducking driven by another audio track, with configurable threshold, target gain, attack and release times; streams the trigger without loading it fully and gives identical results for random and sequential frame access
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)
