@@ -111,6 +111,9 @@ moviepy.video.fx
    moviepy.video.fx.Painting
 
 
+   moviepy.video.fx.Perspective
+
+
    moviepy.video.fx.Resize
 
 

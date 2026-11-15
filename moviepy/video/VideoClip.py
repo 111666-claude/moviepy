@@ -36,6 +36,7 @@ from moviepy.decorators import (
 )
 from moviepy.tools import compute_position, extensions_dict, find_extension
 from moviepy.video.fx.Crop import Crop
+from moviepy.video.fx.Perspective import Perspective
 from moviepy.video.fx.Resize import Resize
 from moviepy.video.fx.Rotate import Rotate
 from moviepy.video.io.ffmpeg_writer import ffmpeg_write_video
@@ -1169,6 +1170,21 @@ class VideoClip(Clip):
                     center=center,
                     translate=translate,
                     bg_color=bg_color,
+                )
+            ]
+        )
+
+    def perspectived(self, points, resample="bilinear", canvas_size=None):
+        """Projects each frame of the clip onto the target quadrilateral
+        defined by ``points`` using a four-corner perspective mapping.
+        For info on the parameters, please see ``vfx.Perspective``
+        """
+        return self.with_effects(
+            [
+                Perspective(
+                    points=points,
+                    resample=resample,
+                    canvas_size=canvas_size,
                 )
             ]
         )
