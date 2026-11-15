@@ -16,12 +16,13 @@ from moviepy.video.tools.credits import CreditsClip
 from moviepy.video.tools.cuts import (
     FramesMatch,
     FramesMatches,
+    SceneChange,
+    SceneChanges,
     detect_scenes,
     find_video_period,
 )
 from moviepy.video.tools.drawing import circle, color_gradient, color_split
 from moviepy.video.tools.interpolators import Interpolator, Trajectory
-
 
 try:
     importlib.import_module("ipython.display")
@@ -74,6 +75,384 @@ def test_detect_scenes():
     cuts, luminosities = detect_scenes(video, fps=10, logger=None)
 
     assert len(cuts) == 2
+
+
+# ---------------------------------------------------------------------------
+# Histogram-based scene detection
+# ---------------------------------------------------------------------------
+
+HIST_FPS = 10
+HIST_SIZE = (64, 48)
+
+
+def _solid_frame(color):
+    return np.full((HIST_SIZE[1], HIST_SIZE[0], 3), color, dtype=np.uint8)
+
+
+def _frames_clip(frame_list, fps=HIST_FPS):
+    """Build a clip serving the given synthetic frames at the given fps."""
+    n_frames = len(frame_list)
+
+    def make_frame(t):
+        index = min(int(round(t * fps)), n_frames - 1)
+        return frame_list[index]
+
+    return VideoClip(make_frame, duration=n_frames / fps).with_fps(fps)
+
+
+def _color_frames(color, count):
+    return [_solid_frame(color) for _ in range(count)]
+
+
+def _fade_frames(color, target, steps):
+    """Linear RGB fade from ``color`` (excluded) to ``target`` (included)."""
+    return [
+        _solid_frame(
+            tuple(
+                int(round(color[c] + (target[c] - color[c]) * k / steps))
+                for c in range(3)
+            )
+        )
+        for k in range(1, steps + 1)
+    ]
+
+
+RED = (255, 0, 0)
+BLUE = (0, 0, 255)  # same per-pixel channel sum as RED: 255
+GREEN = (0, 255, 0)
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+
+
+def test_detect_scenes_histogram_equal_luminosity_hard_cut():
+    """A hard cut between equal-luminosity, different-color shots is found."""
+    clip = _frames_clip(_color_frames(RED, 5) + _color_frames(BLUE, 5))
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert cuts == [(0.0, pytest.approx(0.5)), (pytest.approx(0.5), 1.0)]
+    assert len(changes) == 1
+    change = changes[0]
+    assert isinstance(change, SceneChange)
+    assert change.kind == "hard"
+    assert change.start_time == pytest.approx(0.5)
+    assert change.end_time == pytest.approx(0.5)
+    assert change.score > 0
+
+    # The luminosity method must remain blind to this equal-luminosity cut.
+    lum_cuts, luminosities = detect_scenes(clip, fps=HIST_FPS, logger=None)
+    assert lum_cuts == [(0, 1.0)]
+    assert np.unique(luminosities).size == 1
+
+
+def test_detect_scenes_histogram_several_hard_cuts():
+    """All hard cuts of a multi-scene clip are located on the clip timeline."""
+    clip = _frames_clip(
+        _color_frames(RED, 4) + _color_frames(BLUE, 4) + _color_frames(GREEN, 4)
+    )
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert cuts[0][0] == 0.0
+    assert cuts[-1][1] == pytest.approx(clip.duration)
+    assert [c.kind for c in changes] == ["hard", "hard"]
+    assert [c.start_time for c in changes] == pytest.approx([0.4, 0.8])
+    assert changes.hard_cuts == list(changes)
+    assert changes.gradual_changes == []
+    # Cuts form a contiguous partition of the whole clip.
+    assert [start for start, _ in cuts] == [0.0] + [end for _, end in cuts[:-1]]
+
+
+def test_detect_scenes_histogram_gradual_fade_interval():
+    """A fade reports its start and end times and is not a single hard cut."""
+    frames = (
+        _color_frames(RED, 5) + _fade_frames(RED, BLACK, 5) + _color_frames(BLACK, 5)
+    )
+    clip = _frames_clip(frames)
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert len(changes) == 1
+    change = changes[0]
+    assert change.kind == "gradual"
+    # The fade starts on the first frame after the static red part.
+    assert change.start_time == pytest.approx(0.5)
+    # It ends on the first frame after the transition, inside the static part.
+    assert 1.0 < change.end_time <= 1.2
+    assert change.end_time > change.start_time
+    # The boundary uses the end of the gradual interval and keeps both
+    # surrounding scenes complete.
+    assert cuts[0] == (0.0, pytest.approx(change.end_time))
+    assert cuts[-1][1] == pytest.approx(clip.duration)
+    assert changes.gradual_changes == list(changes)
+
+
+def test_detect_scenes_histogram_slow_fade_with_small_steps():
+    """A slow fade whose per-frame step stays small is still detected."""
+    frames = (
+        _color_frames(RED, 8) + _fade_frames(RED, BLACK, 10) + _color_frames(BLACK, 8)
+    )
+    clip = _frames_clip(frames)
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert len(changes) == 1
+    assert changes[0].kind == "gradual"
+    assert changes[0].start_time == pytest.approx(0.8)
+    assert cuts[-1][1] == pytest.approx(clip.duration)
+
+
+def test_detect_scenes_histogram_single_frame_flash_ignored():
+    """A one-frame white flash does not create a scene."""
+    frames = _color_frames(RED, 5) + _color_frames(WHITE, 1) + _color_frames(RED, 5)
+    clip = _frames_clip(frames)
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert list(changes) == []
+    assert cuts == [(0.0, pytest.approx(clip.duration))]
+
+
+def test_detect_scenes_histogram_two_frame_flash_ignored():
+    """A two-frame flash returning to the same scene is also ignored."""
+    frames = _color_frames(RED, 5) + _color_frames(WHITE, 2) + _color_frames(RED, 5)
+    clip = _frames_clip(frames)
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert list(changes) == []
+    assert cuts == [(0.0, pytest.approx(clip.duration))]
+
+
+def test_detect_scenes_histogram_static_clip():
+    """A fully static clip contains a single, complete scene."""
+    clip = _frames_clip(_color_frames(RED, 10))
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert list(changes) == []
+    assert cuts == [(0.0, pytest.approx(1.0))]
+    assert isinstance(changes, SceneChanges)
+    assert changes.distances.shape == (9,)
+    assert np.all(changes.distances == 0)
+
+
+def test_detect_scenes_histogram_threshold_is_configurable():
+    """A threshold above every distance disables every detection."""
+    clip = _frames_clip(_color_frames(RED, 5) + _color_frames(BLUE, 5))
+
+    cuts, changes = detect_scenes(
+        clip,
+        fps=HIST_FPS,
+        logger=None,
+        method="histogram",
+        histogram_threshold=1.9,
+    )
+
+    assert list(changes) == []
+    assert cuts == [(0.0, pytest.approx(clip.duration))]
+
+    # The same cut is detected again once the threshold is back to its default.
+    cuts_default, changes_default = detect_scenes(
+        clip, fps=HIST_FPS, logger=None, method="histogram"
+    )
+    assert len(changes_default) == 1
+    assert len(cuts_default) == 2
+
+
+def test_detect_scenes_histogram_min_scene_len():
+    """Scenes shorter than min_scene_len are merged, first/last stay complete."""
+    clip = _frames_clip(
+        _color_frames(RED, 4) + _color_frames(BLUE, 4) + _color_frames(GREEN, 4)
+    )
+
+    cuts, changes = detect_scenes(
+        clip,
+        fps=HIST_FPS,
+        logger=None,
+        method="histogram",
+        min_scene_len=0.5,
+    )
+
+    # The 0.4s boundary at t=0.4 is dropped; the t=0.8 boundary is kept.
+    assert cuts == [(0.0, pytest.approx(0.8)), (pytest.approx(0.8), 1.2)]
+    assert cuts[0][0] == 0.0
+    assert cuts[-1][1] == pytest.approx(clip.duration)
+
+
+def test_detect_scenes_histogram_sampling_fps_alignment():
+    """Boundaries are expressed in the clip's timeline for any sampling fps."""
+    clip = _frames_clip(
+        _color_frames(RED, 4) + _color_frames(BLUE, 4) + _color_frames(GREEN, 4)
+    )
+
+    for sampling_fps in (5, 10, 20):
+        cuts, changes = detect_scenes(
+            clip, fps=sampling_fps, logger=None, method="histogram"
+        )
+        assert cuts[0][0] == 0.0
+        assert cuts[-1][1] == pytest.approx(clip.duration)
+        for start, end in cuts:
+            assert 0.0 <= start < end <= clip.duration + 1e-9
+        for change in changes:
+            assert 0.0 <= change.start_time <= clip.duration
+
+
+def test_detect_scenes_histogram_empty_clip():
+    """An empty clip returns an explicit, well-formed empty result."""
+    clip = VideoClip(lambda t: _solid_frame(RED), duration=0).with_fps(HIST_FPS)
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert cuts == [(0, 0)]
+    assert list(changes) == []
+    assert changes.distances.shape == (0,)
+
+    # Same guarantee for the luminosity method.
+    lum_cuts, luminosities = detect_scenes(clip, fps=HIST_FPS, logger=None)
+    assert lum_cuts == [(0, 0)]
+    assert luminosities.shape == (0,)
+
+
+def test_detect_scenes_histogram_no_fps_raises():
+    """A clip without fps and no explicit fps raises a clear error."""
+    clip = VideoClip(lambda t: _solid_frame(RED), duration=1)
+
+    with pytest.raises(AttributeError, match="fps"):
+        detect_scenes(clip, logger=None, method="histogram")
+    with pytest.raises(AttributeError, match="fps"):
+        detect_scenes(clip, logger=None)
+
+
+def test_detect_scenes_histogram_invalid_parameters():
+    """Invalid parameters are rejected with explicit ValueErrors."""
+    clip = _frames_clip(_color_frames(RED, 4))
+
+    with pytest.raises(ValueError, match="method"):
+        detect_scenes(clip, fps=HIST_FPS, logger=None, method="colour")
+    with pytest.raises(ValueError, match="histogram_threshold"):
+        detect_scenes(
+            clip,
+            fps=HIST_FPS,
+            logger=None,
+            method="histogram",
+            histogram_threshold=0,
+        )
+    with pytest.raises(ValueError, match="histogram_threshold"):
+        detect_scenes(
+            clip,
+            fps=HIST_FPS,
+            logger=None,
+            method="histogram",
+            histogram_threshold=-1,
+        )
+    for bad_bins in (0, 1, 257, 1.5):
+        with pytest.raises(ValueError, match="nb_bins"):
+            detect_scenes(
+                clip,
+                fps=HIST_FPS,
+                logger=None,
+                method="histogram",
+                nb_bins=bad_bins,
+            )
+    with pytest.raises(ValueError, match="min_scene_len"):
+        detect_scenes(
+            clip,
+            fps=HIST_FPS,
+            logger=None,
+            method="histogram",
+            min_scene_len=-1,
+        )
+    with pytest.raises(ValueError, match="fps"):
+        detect_scenes(
+            clip,
+            fps=0,
+            logger=None,
+            method="histogram",
+        )
+    with pytest.raises(ValueError, match="clip"):
+        detect_scenes(fps=HIST_FPS, logger=None, method="histogram")
+    with pytest.raises(ValueError, match="luminosities"):
+        detect_scenes(fps=HIST_FPS, logger=None)
+
+
+def test_detect_scenes_histogram_does_not_cache_frames():
+    """Frame arrays produced during detection can all be garbage collected."""
+    import gc
+    import weakref
+
+    frame_sources = _color_frames(RED, 20) + _color_frames(BLUE, 20)
+    references = []
+
+    def make_frame(t):
+        index = min(int(round(t * HIST_FPS)), len(frame_sources) - 1)
+        frame = frame_sources[index].copy()
+        references.append(weakref.ref(frame))
+        return frame
+
+    clip = VideoClip(make_frame, duration=4).with_fps(HIST_FPS)
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert len(cuts) == 2
+    gc.collect()
+    assert sum(ref() is not None for ref in references) == 0
+
+
+def test_detect_scenes_histogram_mask_clip():
+    """Histogram detection works on two-dimensional float mask frames."""
+    dark = ColorClip((32, 32), color=0.2, is_mask=True).with_duration(0.5)
+    bright = ColorClip((32, 32), color=0.9, is_mask=True).with_duration(0.5)
+    clip = concatenate_videoclips([dark, bright])
+
+    cuts, changes = detect_scenes(clip, fps=HIST_FPS, logger=None, method="histogram")
+
+    assert len(changes) == 1
+    assert changes[0].kind == "hard"
+    assert changes[0].start_time == pytest.approx(0.5)
+    assert cuts[-1][1] == pytest.approx(1.0)
+
+
+def test_detect_scenes_luminosity_behavior_unchanged():
+    """The default luminosity mode keeps its historical return contract."""
+    red = ColorClip((64, 48), color=(255, 0, 0)).with_duration(1)
+    green = ColorClip((64, 48), color=(0, 200, 0)).with_duration(1)
+    video = concatenate_videoclips([red, green])
+
+    cuts, luminosities = detect_scenes(video, fps=10, logger=None)
+    default_cuts, default_luminosities = detect_scenes(
+        video, fps=10, logger=None, method="luminosity"
+    )
+
+    assert cuts == default_cuts
+    assert np.array_equal(luminosities, default_luminosities)
+    assert isinstance(luminosities, np.ndarray)
+    assert luminosities.shape == (20,)
+    assert cuts[0][0] == 0
+    assert cuts[-1][1] == pytest.approx(video.duration)
+
+    # The luminosities-only entry point still works without a clip.
+    lum_only_cuts, lum_only = detect_scenes(
+        luminosities=[1.0, 1.0, 50.0, 50.0], fps=2, logger=None
+    )
+    assert np.array_equal(lum_only, np.array([1.0, 1.0, 50.0, 50.0]))
+    assert lum_only_cuts[0][0] == 0
+    assert lum_only_cuts[-1][1] == pytest.approx(2.0)
+
+
+def test_scene_change_and_scene_changes_contract():
+    """SceneChange and SceneChanges expose the documented attributes."""
+    hard = SceneChange(1.0, 1.0, "hard", 1.5)
+    gradual = SceneChange(2.0, 2.5, "gradual", 0.7)
+    changes = SceneChanges([hard, gradual], distances=np.array([1.5, 0.7]))
+
+    assert hard.time_span == 0.0
+    assert gradual.time_span == pytest.approx(0.5)
+    assert changes.hard_cuts == [hard]
+    assert changes.gradual_changes == [gradual]
+    assert np.array_equal(changes.distances, np.array([1.5, 0.7]))
+
+    with pytest.raises(ValueError):
+        SceneChange(0.0, 1.0, "flash", 1.0)
 
 
 def test_find_video_period():

@@ -19,6 +19,8 @@ moviepy.video.tools.cuts
    
       FramesMatch
       FramesMatches
+      SceneChange
+      SceneChanges
    
    
 

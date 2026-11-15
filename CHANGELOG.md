@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- `detect_scenes` gains a `method="histogram"` color-histogram detection mode that finds hard cuts between equally luminous but differently colored shots, reports gradual transitions (fades, dissolves) with their start and end times, ignores single-frame flashes, and streams frames without caching them; new `SceneChange`/`SceneChanges` classes and configurable `histogram_threshold`, `min_scene_len` and `nb_bins` parameters
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)
