@@ -1042,6 +1042,258 @@ def test_multiply_speed():
     ), f"{clip6.duration} {target6.duration} {clip6.fps} {target6.fps}"
 
 
+def _bitmap_letters(clip):
+    """Return the BitmapClip frame letters in playback order."""
+    inverse_colors = {v: k for k, v in BitmapClip.DEFAULT_COLOR_DICT.items()}
+    return [inverse_colors[tuple(frame[0, 0].tolist())] for frame in clip.iter_frames()]
+
+
+def _apply_keyframe_speed(clip, keyframes):
+    """Apply KeyframeSpeed and return (new_clip, effect with built mapping)."""
+    effect = vfx.KeyframeSpeed(keyframes)
+    new_clip = clip.with_effects([effect])
+    # ``with_effects`` applies a shallow copy, so build the mapping on the
+    # original effect to inspect the (identical) time mapping from the tests.
+    effect._mapping = effect._build_mapping(clip.duration)
+    effect.output_duration = float(effect._mapping[3])
+    return new_clip, effect
+
+
+def test_keyframe_speed_mapping_math():
+    """The output duration and the bidirectional mapping are mathematically exact."""
+    clip_duration = 4.0
+    keyframes = [(0, 0.25), (1, 0.25), (3, 1.0), (4, 1.0)]
+    effect = vfx.KeyframeSpeed(keyframes)
+    effect._mapping = effect._build_mapping(clip_duration)
+    effect.output_duration = float(effect._mapping[3])
+
+    # Output duration: 4s of 0.25x, then a linear 0.25 -> 1.0 transition,
+    # then 1s of normal speed.
+    expected_duration = 4 + 2 * np.log(4) / 0.75 + 1
+    assert effect.output_duration == pytest.approx(expected_duration)
+
+    # source_time and output_time are exact inverses of each other.
+    output_grid = np.linspace(0.0, effect.output_duration, 2001)
+    roundtrip = effect.output_time(effect.source_time(output_grid))
+    assert np.abs(roundtrip - output_grid).max() < 1e-10
+
+    source_grid = np.linspace(0.0, clip_duration, 2001)
+    roundtrip = effect.source_time(effect.output_time(source_grid))
+    assert np.abs(roundtrip - source_grid).max() < 1e-10
+
+    # output_time matches a numerical integration of dtau/dsigma = 1 / v.
+    keyframe_times = np.array([kf[0] for kf in keyframes])
+    keyframe_speeds = np.array([kf[1] for kf in keyframes])
+    for source_t in [0.0, 0.5, 1.0, 2.3, 3.0, 3.9, 4.0]:
+        dense = np.linspace(0.0, source_t, 50000)
+        speed = np.interp(
+            dense,
+            keyframe_times,
+            keyframe_speeds,
+            left=keyframe_speeds[0],
+            right=keyframe_speeds[-1],
+        )
+        reference = np.trapezoid(1.0 / speed, dense) if source_t > 0 else 0.0
+        assert effect.output_time(source_t) == pytest.approx(reference, abs=1e-4)
+
+    # Keyframe anchors map exactly, boundaries are not overshooting and the
+    # mapping is strictly monotonic.
+    times, speeds, output_times = effect._mapping[:3]
+    for keyframe_index in range(len(keyframes)):
+        assert effect.source_time(output_times[keyframe_index]) == pytest.approx(
+            times[keyframe_index], abs=1e-9
+        )
+        assert effect.output_time(times[keyframe_index]) == pytest.approx(
+            output_times[keyframe_index], abs=1e-9
+        )
+    assert effect.source_time(0.0) == pytest.approx(0.0, abs=1e-12)
+    assert effect.source_time(effect.output_duration) == pytest.approx(
+        clip_duration, abs=1e-9
+    )
+    assert np.all(np.diff(effect.source_time(output_grid)) > 0)
+
+    # Scalar and array inputs return consistent values.
+    assert effect.source_time(2.5) == pytest.approx(
+        float(effect.source_time(np.array([2.5]))[0])
+    )
+    assert np.isscalar(effect.source_time(1.0))
+    assert np.isscalar(effect.output_time(1.0))
+
+
+def test_keyframe_speed_constant_matches_multiply_speed():
+    """A constant-speed curve is fully equivalent to MultiplySpeed."""
+    clip = BitmapClip([["A"], ["B"], ["C"], ["D"]], fps=1)
+
+    # Two keyframes with the same speed, both for slow and fast motion.
+    slow, slow_effect = _apply_keyframe_speed(clip, [(0, 0.5), (4, 0.5)])
+    assert slow == clip.with_effects([vfx.MultiplySpeed(0.5)])
+    assert slow.duration == pytest.approx(8.0)
+    assert _bitmap_letters(slow) == ["A", "A", "B", "B", "C", "C", "D", "D"]
+
+    fast, _ = _apply_keyframe_speed(clip, [(0, 2.0), (4, 2.0)])
+    assert fast == clip.with_effects([vfx.MultiplySpeed(2)])
+    assert _bitmap_letters(fast) == ["A", "C"]
+
+    # A single keyframe defines a constant speed over the whole clip too.
+    single, single_effect = _apply_keyframe_speed(clip, [(2, 0.5)])
+    assert single == clip.with_effects([vfx.MultiplySpeed(0.5)])
+    assert single_effect.output_duration == pytest.approx(8.0)
+
+
+def test_keyframe_speed_frame_sequence_and_boundaries():
+    """Slow/fast/transition regions retime frames without losing the end frame."""
+    clip = BitmapClip([["A"], ["B"], ["C"], ["D"]], fps=1)
+    new_clip, effect = _apply_keyframe_speed(
+        clip, [(0, 0.25), (1, 0.25), (3, 1.0), (4, 1.0)]
+    )
+
+    # Every output frame maps inside the source clip, in non-decreasing order.
+    source_times = [
+        effect.source_time(index) for index in range(int(new_clip.duration))
+    ]
+    assert all(0.0 <= t <= clip.duration + 1e-9 for t in source_times)
+    assert all(
+        source_times[index] <= source_times[index + 1] + 1e-12
+        for index in range(len(source_times) - 1)
+    )
+
+    letters = _bitmap_letters(new_clip)
+    # 0.25x slow section on source [0, 1] lasts 4 output seconds: A repeats.
+    assert letters[:4] == ["A", "A", "A", "A"]
+    assert letters[0] == "A"
+
+    # The last source frame D is reachable at the very end of the timeline,
+    # i.e. no end frame is dropped, and it is never fetched beyond the clip.
+    inverse_colors = {v: k for k, v in BitmapClip.DEFAULT_COLOR_DICT.items()}
+    last_letter = inverse_colors[
+        tuple(new_clip.get_frame(new_clip.duration - 1e-9)[0, 0].tolist())
+    ]
+    assert last_letter == "D"
+    assert effect.source_time(effect.output_duration) == pytest.approx(
+        clip.duration, abs=1e-9
+    )
+
+    # Random and sequential access return identical frames (deterministic map).
+    rng = np.random.default_rng(0)
+    for t in rng.uniform(0.0, new_clip.duration, 30):
+        assert np.array_equal(
+            new_clip.get_frame(float(t)), new_clip.get_frame(float(t))
+        )
+
+
+def test_keyframe_speed_audio_and_mask_share_mapping():
+    """Attached audio and mask are retimed with the exact same time mapping."""
+    duration = 4.0
+
+    def make_frame(t):
+        frame = np.zeros((2, 2, 3), dtype=float)
+        frame[:, :, 0] = t  # red channel encodes the source time
+        return frame
+
+    # Stereo beeps at known source times, written the canonical way so the
+    # AudioClip detects 2 channels for scalar and array inputs.
+    beep_times = np.array([0.5, 1.5, 2.5, 3.5])
+
+    def beep_frame(t):
+        t_array = np.asarray(t, dtype=float)
+        envelope = np.zeros_like(t_array)
+        for beep_t in beep_times:
+            envelope += (np.abs(t_array - beep_t) < 2e-3).astype(float)
+        signal = 0.8 * envelope * np.sin(2 * np.pi * 440 * t_array)
+        return np.array([signal, signal]).T.copy(order="C")
+
+    video = VideoClip(make_frame, duration=duration).with_fps(1)
+    audio = AudioClip(beep_frame, duration=duration, fps=1000)
+    mask = VideoClip(
+        lambda t: np.full((2, 2), t, dtype=float),
+        duration=duration,
+        is_mask=True,
+    ).with_fps(1)
+    clip = video.with_audio(audio).with_mask(mask)
+
+    new_clip, effect = _apply_keyframe_speed(
+        clip, [(0, 0.25), (1, 0.25), (3, 1.0), (4, 1.0)]
+    )
+
+    # Video, audio and mask durations all match the computed output duration.
+    assert new_clip.duration == pytest.approx(effect.output_duration)
+    assert new_clip.audio.duration == pytest.approx(effect.output_duration)
+    assert new_clip.mask.duration == pytest.approx(effect.output_duration)
+
+    # Video frames and mask values both come from the shared source_time map.
+    for t in np.linspace(0.0, new_clip.duration, 20):
+        source_t = effect.source_time(float(t))
+        assert new_clip.get_frame(t)[0, 0, 0] == pytest.approx(source_t, abs=1e-9)
+        assert new_clip.mask.get_frame(t)[0, 0] == pytest.approx(source_t, abs=1e-9)
+
+    # Audio pulses land at the output times predicted by output_time. Detect
+    # each pulse as a run of high samples; runs are separated by silence which
+    # is always much longer than a (possibly time-stretched) pulse.
+    def detect_pulse_times(audio_clip, fps):
+        times = np.arange(0.0, audio_clip.duration, 1 / fps)
+        values = audio_clip.get_frame(times)
+        mono = values.max(axis=1) if np.ndim(values) > 1 else np.atleast_1d(values)
+        detected = times[mono > 0.5]
+        groups = np.split(detected, np.where(np.diff(detected) > 30e-3)[0] + 1)
+        return np.array([group.mean() for group in groups])
+
+    peak_times = detect_pulse_times(new_clip.audio, 1000)
+    expected_peaks = np.array(
+        [effect.output_time(float(beep_t)) for beep_t in beep_times]
+    )
+    assert len(peak_times) == len(beep_times)
+    assert np.allclose(peak_times, expected_peaks, atol=4e-3)
+
+    # The same holds for a speed-up curve: the pulses get shorter, so a higher
+    # audio sampling rate keeps every pulse resolved.
+    fast_audio = AudioClip(beep_frame, duration=duration, fps=8000)
+    fast_clip_input = video.with_audio(fast_audio).with_mask(mask)
+    fast_clip, fast_effect = _apply_keyframe_speed(
+        fast_clip_input, [(0, 2.0), (2, 1.0), (4, 0.5)]
+    )
+    peak_times = detect_pulse_times(fast_clip.audio, 8000)
+    expected_peaks = np.array(
+        [fast_effect.output_time(float(beep_t)) for beep_t in beep_times]
+    )
+    assert len(peak_times) == len(beep_times)
+    assert np.allclose(peak_times, expected_peaks, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "keyframes, message",
+    [
+        ([], "at least one"),
+        (None, "at least one"),
+        ([(0, 1.0), (2, 0.5), (1, 1.0)], "strictly increasing"),
+        ([(1, 1.0), (1, 2.0)], "strictly increasing"),
+        ([(0, 0.0), (4, 1.0)], "positive"),
+        ([(0, -1.0), (4, 1.0)], "positive"),
+        ([(0, float("inf")), (4, 1.0)], "finite"),
+        ([(0, float("nan")), (4, 1.0)], "finite"),
+        ([(float("nan"), 1.0), (4, 1.0)], "finite"),
+        ([(float("inf"), 1.0)], "finite"),
+        ([(-0.1, 1.0), (4, 1.0)], "outside"),
+        ([(0, 1.0), (4.1, 1.0)], "outside"),
+        ([(1,)], "pair"),
+        ([(1, 2, 3)], "pair"),
+        (["not-a-pair"], "pair"),
+        ([42], "pair"),
+    ],
+)
+def test_keyframe_speed_validation(keyframes, message):
+    """Invalid keyframe definitions raise explicit ValueErrors."""
+    clip = BitmapClip([["A"], ["B"], ["C"], ["D"]], fps=1)
+    with pytest.raises(ValueError, match=message):
+        clip.with_effects([vfx.KeyframeSpeed(keyframes)])
+
+
+def test_keyframe_speed_requires_duration():
+    """A clip without a duration cannot be retimed from keyframes."""
+    infinite_clip = VideoClip(lambda t: np.zeros((2, 2, 3)), has_constant_size=True)
+    with pytest.raises(ValueError, match="duration"):
+        infinite_clip.with_effects([vfx.KeyframeSpeed([(0, 1.0)])])
+
+
 def test_supersample():
     pass
 

@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `vfx.KeyframeSpeed` effect retiming a clip from a keyframed speed curve, with linear speed transitions between keyframes and a bidirectional time mapping shared by the video, audio and mask
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)

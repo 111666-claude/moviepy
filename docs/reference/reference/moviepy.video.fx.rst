@@ -75,6 +75,9 @@ moviepy.video.fx
    moviepy.video.fx.InvertColors
 
 
+   moviepy.video.fx.KeyframeSpeed
+
+
    moviepy.video.fx.Loop
 
 

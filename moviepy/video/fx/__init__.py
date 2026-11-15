@@ -16,6 +16,7 @@ from moviepy.video.fx.FreezeRegion import FreezeRegion
 from moviepy.video.fx.GammaCorrection import GammaCorrection
 from moviepy.video.fx.HeadBlur import HeadBlur
 from moviepy.video.fx.InvertColors import InvertColors
+from moviepy.video.fx.KeyframeSpeed import KeyframeSpeed
 from moviepy.video.fx.Loop import Loop
 from moviepy.video.fx.LumContrast import LumContrast
 from moviepy.video.fx.MakeLoopable import MakeLoopable
@@ -53,6 +54,7 @@ __all__ = (
     "GammaCorrection",
     "HeadBlur",
     "InvertColors",
+    "KeyframeSpeed",
     "Loop",
     "LumContrast",
     "MakeLoopable",
