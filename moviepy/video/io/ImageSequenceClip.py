@@ -5,8 +5,12 @@ of image files.
 import os
 
 import numpy as np
+import proglog
 from imageio.v2 import imread
 
+from moviepy.Clip import Clip
+from moviepy.tools import find_extension
+from moviepy.video.io.ffmpeg_writer import ffmpeg_write_video_vfr
 from moviepy.video.VideoClip import VideoClip
 
 
@@ -134,6 +138,155 @@ class ImageSequenceClip(VideoClip):
                 )
 
         self.size = self.frame_function(0).shape[:2][::-1]
+
+    def write_videofile_vfr(
+        self,
+        filename,
+        codec="libx264",
+        bitrate=None,
+        audio=True,
+        audio_fps=44100,
+        preset="medium",
+        audio_nbytes=4,
+        audio_codec=None,
+        audio_bitrate=None,
+        audio_bufsize=2000,
+        temp_audiofile=None,
+        temp_audiofile_path="",
+        remove_temp=True,
+        write_logfile=False,
+        threads=None,
+        ffmpeg_params=None,
+        logger="bar",
+        pixel_format=None,
+    ):
+        """Write the clip to a variable frame rate (VFR) video file.
+
+        Each image of the sequence is encoded exactly once and stays on
+        screen for its entry in ``durations``, instead of being resampled
+        at a fixed frame rate like ``write_videofile`` does. This avoids
+        generating large amounts of identical frames for long still images.
+
+        The output container must support VFR timestamps: use a ``.mp4``
+        or ``.mkv`` filename.
+
+        Parameters
+        ----------
+
+        filename
+          Name of the video file to write, with extension ``.mp4`` or
+          ``.mkv``.
+
+        codec
+          Codec to use for image encoding, ``'libx264'`` by default.
+
+        audio
+          Either ``True``, ``False``, or a file name. If ``True`` and the
+          clip has an audio clip attached, this audio clip will be
+          incorporated as a soundtrack in the movie, synchronized with the
+          variable frame rate video. If ``audio`` is the name of an audio
+          file, this file is incorporated instead.
+
+        The other parameters are the same as in
+        ``VideoClip.write_videofile``, except that there is no ``fps``
+        parameter: the timing is entirely driven by the clip's durations.
+
+        Examples
+        --------
+
+        .. code:: python
+
+            clip = ImageSequenceClip(images, durations=[0.2, 1.0, 0.4])
+            clip.write_videofile_vfr("slideshow.mp4")
+        """
+        name, ext = os.path.splitext(os.path.basename(filename))
+        ext = ext[1:].lower()
+        logger = proglog.default_bar_logger(logger)
+
+        if ext not in ("mp4", "mkv"):
+            raise ValueError(
+                "MoviePy error: write_videofile_vfr requires a container "
+                "supporting variable frame rate timestamps: '.mp4' or "
+                f"'.mkv' (got '{os.path.basename(filename)}')."
+            )
+
+        durations = self.durations
+        if len(durations) != len(self.sequence):
+            raise ValueError(
+                "MoviePy error: the number of durations "
+                f"({len(durations)}) does not match the number of images "
+                f"({len(self.sequence)})."
+            )
+        for d in durations:
+            if not np.isfinite(d) or d <= 0:
+                raise ValueError(
+                    "MoviePy error: write_videofile_vfr requires every "
+                    "image duration to be finite and strictly positive, "
+                    f"got {d}."
+                )
+
+        if audio_codec is None:
+            # libvorbis is preferred for Matroska: unlike mp3, its
+            # timestamps carry no encoder delay, which keeps the
+            # soundtrack synchronized with the VFR video frames.
+            audio_codec = "libvorbis" if ext == "mkv" else "libmp3lame"
+        elif audio_codec == "raw16":
+            audio_codec = "pcm_s16le"
+        elif audio_codec == "raw32":
+            audio_codec = "pcm_s32le"
+
+        audiofile = audio if isinstance(audio, str) else None
+        make_audio = (
+            (audiofile is None) and (audio is True) and (self.audio is not None)
+        )
+
+        if make_audio and temp_audiofile:
+            # The audio will be the clip's audio
+            audiofile = temp_audiofile
+        elif make_audio:
+            audio_ext = find_extension(audio_codec)
+            audiofile = os.path.join(
+                temp_audiofile_path,
+                name + Clip._TEMP_FILES_PREFIX + "wvf_snd.%s" % audio_ext,
+            )
+
+        logger(message="MoviePy - Building video %s." % filename)
+        if make_audio:
+            self.audio.write_audiofile(
+                audiofile,
+                audio_fps,
+                audio_nbytes,
+                audio_bufsize,
+                audio_codec,
+                bitrate=audio_bitrate,
+                write_logfile=write_logfile,
+                logger=logger,
+            )
+            # The audio is already encoded,
+            # so there is no need to encode it during video export
+            audio_codec = "copy"
+
+        try:
+            ffmpeg_write_video_vfr(
+                self,
+                filename,
+                durations,
+                codec=codec,
+                bitrate=bitrate,
+                preset=preset,
+                write_logfile=write_logfile,
+                audiofile=audiofile,
+                audio_codec=audio_codec,
+                threads=threads,
+                ffmpeg_params=ffmpeg_params,
+                logger=logger,
+                pixel_format=pixel_format,
+            )
+        finally:
+            if remove_temp and make_audio:
+                if os.path.exists(audiofile):
+                    os.remove(audiofile)
+        logger(message="MoviePy - video ready %s" % filename)
 
     def _find_image_index(self, t):
         return max([i for i in range(len(self.sequence)) if self.images_starts[i] <= t])

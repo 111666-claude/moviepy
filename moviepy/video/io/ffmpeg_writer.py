@@ -3,9 +3,13 @@ On the long term this will implement several methods to make videos
 out of VideoClips
 """
 
+import os
+import shutil
 import subprocess as sp
+import tempfile
 
 import numpy as np
+from imageio.v2 import imwrite
 from proglog import proglog
 
 from moviepy.config import FFMPEG_BINARY
@@ -316,6 +320,203 @@ def ffmpeg_write_video(
 
     if write_logfile:
         logfile.close()
+    logger(message="MoviePy - Done !")
+
+
+def _ffmpeg_concat_escape(path):
+    """Escapes a file path for use in an FFMPEG concat demuxer file."""
+    return path.replace("\\", "\\\\").replace("'", "'\\''")
+
+
+def ffmpeg_write_video_vfr(
+    clip,
+    filename,
+    durations,
+    codec="libx264",
+    bitrate=None,
+    preset="medium",
+    write_logfile=False,
+    audiofile=None,
+    audio_codec=None,
+    threads=None,
+    ffmpeg_params=None,
+    logger="bar",
+    pixel_format=None,
+):
+    """Write the clip to a variable frame rate (VFR) video file.
+
+    Instead of sampling the clip at a fixed frame rate, each frame of the
+    clip's underlying sequence is rendered exactly once and is assigned a
+    presentation duration from ``durations``. This avoids generating large
+    amounts of identical frames for long still images.
+
+    The output container must support variable frame rate timestamps
+    (MP4 or Matroska).
+
+    Parameters
+    ----------
+
+    clip
+      The clip to write. One frame is rendered per entry of ``durations``,
+      at the times given by the cumulative sum of the durations.
+
+    filename
+      Name of the output file. The extension must be ``.mp4`` or ``.mkv``.
+
+    durations
+      List of the display duration (in seconds) of each frame. All durations
+      must be finite and strictly positive.
+
+    See ``ffmpeg_write_video`` for the other parameters.
+    """
+    logger = proglog.default_bar_logger(logger)
+
+    ext = os.path.splitext(os.path.basename(filename))[1][1:].lower()
+    if ext not in ("mp4", "mkv"):
+        raise ValueError(
+            "MoviePy error: variable frame rate export requires a container "
+            "supporting VFR timestamps: '.mp4' or '.mkv' "
+            f"(got '{os.path.basename(filename)}')."
+        )
+
+    durations = [float(d) for d in durations]
+    for d in durations:
+        if not np.isfinite(d) or d <= 0:
+            raise ValueError(
+                "MoviePy error: variable frame rate export requires every "
+                f"frame duration to be finite and strictly positive, got {d}."
+            )
+
+    if write_logfile:
+        logfile = open(filename + ".log", "w+")
+    else:
+        logfile = None
+
+    logger(message="MoviePy - Writing video %s\n" % filename)
+
+    has_mask = clip.mask is not None
+
+    if pixel_format is None:
+        if has_mask:
+            pixel_format = "rgba"
+        elif (
+            codec in ("libx264", "h264_nvenc")
+            and clip.size[0] % 2 == 0
+            and clip.size[1] % 2 == 0
+        ):
+            pixel_format = "yuv420p"
+        else:
+            pixel_format = "rgb24"
+
+    # Render each distinct frame exactly once, no matter how long it stays
+    # on screen, and describe the timing with an FFMPEG concat demuxer file.
+    frames_dir = tempfile.mkdtemp(prefix="moviepy_vfr_")
+    try:
+        starts = np.concatenate(([0.0], np.cumsum(durations)[:-1]))
+        frame_files = []
+        for i, t in enumerate(starts):
+            frame = clip.get_frame(t).astype("uint8")
+            if has_mask:
+                mask = 255 * clip.mask.get_frame(t)
+                if mask.dtype != "uint8":
+                    mask = mask.astype("uint8")
+                frame = np.dstack([frame, mask])
+            frame_file = os.path.join(frames_dir, "frame_%06d.png" % i)
+            imwrite(frame_file, frame)
+            frame_files.append(frame_file)
+            logger(message="MoviePy - Rendered frame %d/%d" % (i + 1, len(frame_files)))
+
+        concat_file = os.path.join(frames_dir, "concat.txt")
+        with open(concat_file, "w") as f:
+            f.write("ffconcat version 1.0\n")
+            for frame_file, duration in zip(frame_files, durations):
+                f.write("file '%s'\n" % _ffmpeg_concat_escape(frame_file))
+                f.write("duration %.9f\n" % duration)
+
+        # The concat demuxer sets the presentation time of each frame but
+        # not its display duration, so the duration of the very last frame
+        # (which has no successor to derive it from) is set explicitly with
+        # the "setts" bitstream filter. B-frames are disabled because
+        # encoders derive reordering timestamps from a constant frame rate
+        # assumption, which corrupts the timestamps of a VFR stream.
+        setts = "setts=duration='if(eq(N,%d),%.9f/TB,DURATION)'" % (
+            len(durations) - 1,
+            durations[-1],
+        )
+
+        cmd = [
+            FFMPEG_BINARY,
+            "-y",
+            "-loglevel",
+            "error" if logfile is None else "info",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_file,
+        ]
+        if audiofile is not None:
+            cmd.extend(["-i", audiofile])
+
+        cmd.extend(["-fps_mode", "vfr"])
+
+        if codec == "h264_nvenc":
+            cmd.extend(["-c:v", codec])
+        else:
+            cmd.extend(["-vcodec", codec])
+        cmd.extend(["-preset", preset])
+        cmd.extend(["-bf", "0"])
+        cmd.extend(["-bsf:v", setts])
+
+        if audiofile is not None:
+            cmd.extend(["-acodec", audio_codec if audio_codec else "copy"])
+
+        if ffmpeg_params is not None:
+            cmd.extend(ffmpeg_params)
+
+        if bitrate is not None:
+            cmd.extend(["-b", bitrate])
+
+        if threads is not None:
+            cmd.extend(["-threads", str(threads)])
+
+        cmd.extend(["-pix_fmt", pixel_format])
+        cmd.extend([ffmpeg_escape_filename(filename)])
+
+        popen_params = cross_platform_popen_params(
+            {"stdout": sp.DEVNULL, "stderr": logfile if logfile else sp.PIPE}
+        )
+        proc = sp.Popen(cmd, **popen_params)
+        _, ffmpeg_error = proc.communicate()
+
+        if proc.returncode:
+            if ffmpeg_error is not None:
+                ffmpeg_error = ffmpeg_error.decode()
+            else:
+                # The error was redirected to a logfile with
+                # `write_logfile=True`, so read the error from that file
+                logfile.seek(0)
+                ffmpeg_error = logfile.read()
+
+            error = (
+                "MoviePy error: FFMPEG encountered the following error while "
+                f"writing file {filename}: \n\n {ffmpeg_error}"
+            )
+
+            if "Unknown encoder" in ffmpeg_error:
+                error += (
+                    "\n\nThe video export failed because FFMPEG didn't find "
+                    "the specified codec. Please install this codec or choose "
+                    "another one, for instance 'libx264'."
+                )
+
+            raise IOError(error)
+    finally:
+        shutil.rmtree(frames_dir, ignore_errors=True)
+        if write_logfile:
+            logfile.close()
+
     logger(message="MoviePy - Done !")
 
 
