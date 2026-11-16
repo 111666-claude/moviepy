@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `TrackingCrop` video effect producing a fixed-size crop whose center follows time-based position keyframes, with linear interpolation between keyframes and automatic clamping to keep the window inside the source frame
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)

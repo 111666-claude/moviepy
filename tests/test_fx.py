@@ -1571,5 +1571,237 @@ def test_audio_fadeout(
         assert round(subclip_max_volume, 4) == 1
 
 
+def make_tracking_clip(width=10, height=8, duration=4, fps=5):
+    """Synthetic clip whose frames encode their own pixel coordinates.
+
+    Channel 0 of every pixel equals its column index and channel 1 its row
+    index, so reading a cropped frame reveals exactly which source window was
+    extracted. A bright target pixel (channel 2 set to 255) moves one column
+    per second along row 4, giving a known trajectory to track.
+    """
+
+    def frame_function(t):
+        frame = np.zeros((height, width, 3), dtype="uint8")
+        frame[:, :, 0] = np.arange(width, dtype="uint8")
+        frame[:, :, 1] = np.arange(height, dtype="uint8")[:, np.newaxis]
+        target_x = int(round(2 + t))
+        if 0 <= target_x < width:
+            frame[4, target_x, 2] = 255
+        return frame
+
+    return VideoClip(frame_function, duration=duration).with_fps(fps)
+
+
+def make_tracking_mask(width=10, height=8, duration=4, fps=5):
+    """Mask clip with a distinct per-pixel value pattern (x + y)."""
+
+    def frame_function(t):
+        xs = np.arange(width, dtype=float)[np.newaxis, :]
+        ys = np.arange(height, dtype=float)[:, np.newaxis]
+        return ((xs + ys) % 7) / 6.0
+
+    return VideoClip(frame_function, duration=duration, is_mask=True).with_fps(fps)
+
+
+def test_tracking_crop_keyframes_and_midpoint():
+    clip = make_tracking_clip()
+    keyframes = [(0, 2, 4), (4, 8, 4)]
+    cropped = clip.with_effects(
+        [vfx.TrackingCrop(width=4, height=4, keyframes=keyframes)]
+    )
+
+    # Fixed output size on every frame.
+    assert cropped.size == (4, 4)
+    assert cropped.duration == clip.duration
+    assert cropped.fps == clip.fps
+
+    expected_windows = {
+        0.0: (0, 2),  # first keyframe, clamped to the left edge
+        1.0: (1, 2),  # interpolated center (3.5, 4)
+        2.0: (3, 2),  # midpoint between the two keyframes
+        3.0: (4, 2),  # interpolated center (6.5, 4)
+        4.0: (6, 2),  # last keyframe, clamped to the right edge
+    }
+    for t, (x1, y1) in expected_windows.items():
+        frame = cropped.get_frame(t)
+        assert frame.shape == (4, 4, 3)
+        # Channel 0/1 expose the source column/row of every cropped pixel,
+        # independently of the moving target encoded in channel 2.
+        assert np.all(frame[:, :, 0] == np.arange(x1, x1 + 4))
+        assert np.all(frame[:, :, 1] == np.arange(y1, y1 + 4)[:, np.newaxis])
+
+
+def test_tracking_crop_boundary_times_hold_end_keyframes():
+    clip = make_tracking_clip()
+    cropped = clip.with_effects(
+        [vfx.TrackingCrop(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])]
+    )
+
+    def window_origin(t):
+        frame = cropped.get_frame(t)
+        return int(frame[0, 0, 0]), int(frame[0, 0, 1])
+
+    # Times outside the keyframe time range hold the nearest end keyframe's
+    # window (here channel 2 still shows whatever target exists at that time,
+    # so compare only the window position encoded in channels 0/1).
+    assert window_origin(-1.0) == window_origin(0.0) == (0, 2)
+    assert window_origin(5.0) == window_origin(4.0) == (6, 2)
+    # The clamped first/last windows touch the source frame edges.
+    assert cropped.get_frame(0.0)[0, 0, 0] == 0
+    assert cropped.get_frame(4.0)[0, -1, 0] == clip.w - 1
+
+
+def test_tracking_crop_clamps_overshooting_center():
+    clip = make_tracking_clip()
+    # Both keyframe centers are far outside the frame; the window must still
+    # fit entirely inside every source frame instead of producing padding.
+    cropped = clip.with_effects(
+        [
+            vfx.TrackingCrop(
+                width=4,
+                height=4,
+                keyframes=[(0, -100, 100), (4, 100, -100)],
+            )
+        ]
+    )
+    for t in np.linspace(0, 4, 9):
+        frame = cropped.get_frame(float(t))
+        assert frame.shape == (4, 4, 3)
+        assert frame[:, :, 0].min() >= 0
+        assert frame[:, :, 0].max() <= clip.w - 1
+        assert frame[:, :, 1].min() >= 0
+        assert frame[:, :, 1].max() <= clip.h - 1
+
+
+def test_tracking_crop_random_access_is_deterministic():
+    clip = make_tracking_clip()
+    cropped = clip.with_effects(
+        [vfx.TrackingCrop(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])]
+    )
+
+    reference = {t: cropped.get_frame(t).copy() for t in (0.0, 0.7, 2.0, 3.3, 4.0)}
+    # Access the frames again in a different order, repeatedly.
+    for _ in range(3):
+        for t in reversed(list(reference)):
+            assert np.array_equal(cropped.get_frame(t), reference[t])
+
+    # The same effect object applied twice yields equivalent clips.
+    effect = vfx.TrackingCrop(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])
+    other = clip.with_effects([effect])
+    for t in reference:
+        assert np.array_equal(other.get_frame(t), reference[t])
+
+
+def test_tracking_crop_applies_same_window_to_mask():
+    clip = make_tracking_clip().with_mask(make_tracking_mask())
+    cropped = clip.with_effects(
+        [vfx.TrackingCrop(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])]
+    )
+
+    assert cropped.mask is not None
+    assert cropped.mask.size == (4, 4)
+    for t in (0.0, 2.0, 4.0):
+        rgb_frame = cropped.get_frame(t)
+        mask_frame = cropped.mask.get_frame(t)
+        assert mask_frame.shape == (4, 4)
+
+        x1 = int(rgb_frame[0, 0, 0])
+        y1 = int(rgb_frame[0, 0, 1])
+        xs = np.arange(x1, x1 + 4, dtype=float)[np.newaxis, :]
+        ys = np.arange(y1, y1 + 4, dtype=float)[:, np.newaxis]
+        expected_mask = ((xs + ys) % 7) / 6.0
+        assert np.allclose(mask_frame, expected_mask)
+
+
+def test_tracking_crop_keeps_audio_duration_and_fps():
+    from moviepy.audio.AudioClip import AudioArrayClip
+
+    clip = make_tracking_clip()
+    audio_fps = 22050
+    audio = AudioArrayClip(
+        np.linspace(-0.5, 0.5, audio_fps * clip.duration)[:, np.newaxis],
+        fps=audio_fps,
+    )
+    clip = clip.with_audio(audio)
+
+    cropped = clip.with_effects(
+        [vfx.TrackingCrop(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])]
+    )
+
+    assert cropped.audio is not None
+    assert cropped.audio is not clip.audio
+    assert cropped.duration == clip.duration
+    assert cropped.fps == clip.fps
+    assert cropped.audio.fps == audio_fps
+    assert np.array_equal(cropped.audio.get_frame(1.23), clip.audio.get_frame(1.23))
+
+
+def test_tracking_crop_invalid_arguments():
+    clip = make_tracking_clip()
+    base_kwargs = dict(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])
+
+    def must_fail(**overrides):
+        kwargs = dict(base_kwargs)
+        kwargs.update(overrides)
+        with pytest.raises(ValueError):
+            clip.with_effects([vfx.TrackingCrop(**kwargs)])
+
+    # Duplicated and reversed keyframe times.
+    must_fail(keyframes=[(1, 2, 4), (1, 8, 4)])
+    must_fail(keyframes=[(4, 2, 4), (0, 8, 4)])
+    # A single keyframe cannot be interpolated.
+    must_fail(keyframes=[(0, 2, 4)])
+    # Non-finite coordinates or times.
+    must_fail(keyframes=[(0, float("nan"), 4), (4, 8, 4)])
+    must_fail(keyframes=[(0, 2, float("inf")), (4, 8, 4)])
+    must_fail(keyframes=[(float("-inf"), 2, 4), (4, 8, 4)])
+    # Malformed keyframes.
+    must_fail(keyframes=[(0, 2), (4, 8, 4)])
+    must_fail(keyframes="not iterable")
+    # Crop window larger than the source frame, in either dimension.
+    must_fail(width=12)
+    must_fail(height=10)
+    # Non-positive or non-finite window dimensions.
+    must_fail(width=0)
+    must_fail(height=-2)
+    must_fail(width=float("nan"))
+    # Negative keyframe time.
+    must_fail(keyframes=[(-1, 2, 4), (4, 8, 4)])
+
+
+def test_tracking_crop_rejects_variable_frame_sizes():
+    width, height = 10, 8
+
+    def shrinking_frame_function(t):
+        # The frame at t=2 shrinks instead of keeping the source size.
+        h = height if t != 2 else height - 2
+        return np.zeros((h, width, 3), dtype="uint8")
+
+    # A clip that honestly reports varying frame sizes is rejected up front.
+    variable_clip = VideoClip(
+        shrinking_frame_function, duration=4, has_constant_size=False
+    )
+    with pytest.raises(ValueError):
+        variable_clip.with_effects(
+            [vfx.TrackingCrop(width=4, height=4, keyframes=[(0, 2, 4), (4, 8, 4)])]
+        )
+
+    # A clip advertised as constant-sized but lying about it fails loudly at
+    # render time, rather than silently emitting a smaller frame.
+    lying_clip = VideoClip(shrinking_frame_function, duration=4, has_constant_size=True)
+    cropped = lying_clip.with_effects(
+        [
+            vfx.TrackingCrop(
+                width=4,
+                height=4,
+                keyframes=[(0, 2, 4), (4, 8, 4)],
+            )
+        ]
+    )
+    assert cropped.get_frame(0).shape == (4, 4, 3)
+    with pytest.raises(ValueError):
+        cropped.get_frame(2)
+
+
 if __name__ == "__main__":
     pytest.main()

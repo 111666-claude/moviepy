@@ -135,3 +135,6 @@ moviepy.video.fx
    moviepy.video.fx.TimeSymmetrize
 
 
+   moviepy.video.fx.TrackingCrop
+
+
