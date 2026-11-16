@@ -29,9 +29,10 @@ moviepy.video.tools.cuts
 
    .. autosummary::
       :toctree:
-   
+
       detect_scenes
       find_video_period
+      montage_on_onsets
    
    
 

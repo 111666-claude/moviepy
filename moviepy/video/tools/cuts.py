@@ -4,7 +4,11 @@ from collections import defaultdict
 
 import numpy as np
 
+from moviepy.audio.fx.AudioLoop import AudioLoop
+from moviepy.audio.tools.cuts import find_audio_onsets
 from moviepy.decorators import convert_parameter_to_seconds, use_clip_fps_by_default
+from moviepy.video.compositing.CompositeVideoClip import concatenate_videoclips
+from moviepy.video.fx.Loop import Loop
 
 
 @use_clip_fps_by_default
@@ -520,3 +524,175 @@ def detect_scenes(
     timings = [0] + list((1.0 / fps) * luminosity_jumps) + [end]
     cuts = [(t1, t2) for t1, t2 in zip(timings, timings[1:])]
     return cuts, luminosities
+
+
+def montage_on_onsets(
+    audio,
+    clips,
+    duration,
+    window_duration=0.05,
+    min_shot_duration=0.3,
+    energy_threshold=1.5,
+):
+    """Builds a basic montage whose cuts follow the audio onset peaks.
+
+    The onset (attack) times of ``audio`` are detected from its energy changes
+    with ``find_audio_onsets`` and used as cut points. The video clips provided
+    in ``clips`` are used one after another, each one trimmed or looped to fill
+    the shot opened by the next cut point. The original audio track is attached
+    to the resulting clip, trimmed or looped to ``duration``. This gives a
+    first "auto-edit on the beat" entry point, e.g. to cut footage on drum hits.
+
+    Parameters
+    ----------
+
+    audio : moviepy.audio.AudioClip.AudioClip
+      Audio track driving the cuts. It must have a ``duration`` and an ``fps``
+      set. It is read window by window, never fully loaded into memory.
+
+    clips : list of moviepy.video.VideoClip.VideoClip
+      Video material used in order, one clip per shot. A clip shorter than the
+      shot it must fill is looped; a longer one is trimmed. The clips are never
+      modified: only copies (subclips and time transforms) are used. All clips
+      must share the same ``size`` and ``fps``.
+
+    duration : float
+      Target duration of the resulting clip, in seconds. The assembled video
+      always has exactly this duration and keeps its first and last frames.
+
+    window_duration : float, optional
+      Length, in seconds, of the analysis window used to detect the onsets.
+      A track shorter than one window cannot provide any onset.
+
+    min_shot_duration : float, optional
+      Minimum duration, in seconds, of a shot. Onsets closer than this to the
+      previous cut point or to the end of the montage are discarded so that no
+      shot is shorter than this value.
+
+    energy_threshold : float, optional
+      Minimum ratio between the energy of an onset window and the median
+      energy of the preceding windows for an onset to be retained. The larger
+      the value, the more selective (and stable) the detection.
+
+    Returns
+    -------
+
+    tuple
+      A couple ``(cut_times, video_clip)`` where ``cut_times`` is the list of
+      cut times in seconds (always starting with ``0`` and ending with
+      ``duration``) and ``video_clip`` is the assembled ``VideoClip``, with
+      ``audio`` attached and a uniform size and fps.
+
+    Examples
+    --------
+
+    .. code:: python
+
+        from moviepy import AudioFileClip, VideoFileClip
+        from moviepy.video.tools.cuts import montage_on_onsets
+
+        music = AudioFileClip("music.mp3")
+        footage = [VideoFileClip(f"shot{i}.mp4") for i in range(4)]
+        cut_times, montage = montage_on_onsets(
+            music, footage, duration=10, window_duration=0.05,
+            min_shot_duration=0.5,
+        )
+    """
+    if not clips:
+        raise ValueError("'clips' must contain at least one video clip")
+    if duration is None or duration <= 0:
+        raise ValueError("'duration' must be a strictly positive number")
+    if min_shot_duration is None or min_shot_duration <= 0:
+        raise ValueError("'min_shot_duration' must be a strictly positive number")
+    if min_shot_duration > duration:
+        raise ValueError(
+            "'min_shot_duration' cannot be greater than 'duration' "
+            f"({min_shot_duration} > {duration})"
+        )
+    if getattr(audio, "duration", None) is None:
+        raise ValueError("'audio' must have a duration set")
+    if getattr(audio, "fps", None) is None:
+        raise ValueError("'audio' must have an fps set")
+    if audio.duration < window_duration:
+        raise ValueError(
+            "The audio track is shorter than one analysis window "
+            f"({audio.duration}s < {window_duration}s), so no onset can be"
+            " detected"
+        )
+
+    sizes = [getattr(clip, "size", None) for clip in clips]
+    if any(size is None for size in sizes):
+        raise ValueError("Every video clip must have a 'size' attribute set")
+    if len(set(sizes)) != 1:
+        raise ValueError(f"All video clips must have the same size, got sizes {sizes}")
+
+    fpss = [getattr(clip, "fps", None) for clip in clips]
+    if any(fps is None for fps in fpss):
+        raise ValueError("Every video clip must have an 'fps' attribute set")
+    if len(set(fpss)) != 1:
+        raise ValueError(
+            f"All video clips must have the same fps, got fps values {fpss}"
+        )
+
+    for clip in clips:
+        if getattr(clip, "duration", None) is None:
+            raise ValueError("Every video clip must have a duration set")
+        if clip.duration <= 0:
+            raise ValueError("Every video clip must have a strictly positive duration")
+
+    # Only scan the part of the track covered by the montage.
+    onsets = find_audio_onsets(
+        audio,
+        window_duration=window_duration,
+        energy_threshold=energy_threshold,
+        min_onset_distance=min_shot_duration,
+        max_duration=duration,
+    )
+
+    # Keep the cut points that open a shot long enough and leave a final shot
+    # long enough, so that no shot is shorter than ``min_shot_duration``.
+    cut_times = [0.0]
+    for onset in onsets[1:]:
+        if onset - cut_times[-1] < min_shot_duration:
+            continue
+        if duration - onset < min_shot_duration:
+            break
+        cut_times.append(float(onset))
+    cut_times.append(float(duration))
+
+    shot_durations = np.diff(cut_times)
+    if len(shot_durations) > len(clips):
+        raise ValueError(
+            f"Not enough material: {len(shot_durations)} shots are needed but"
+            f" only {len(clips)} video clips were provided"
+        )
+
+    shot_clips = []
+    for clip, shot_duration in zip(clips, shot_durations):
+        # Drop the source clip's own sound: the input audio track is the only
+        # soundtrack of the assembled montage. ``without_audio`` returns a copy,
+        # the source clip is left untouched.
+        shot_clip = clip.without_audio()
+        if clip.duration < shot_duration:
+            # Loop the material then trim the extra tail so the shot keeps its
+            # first frames and has exactly the requested duration.
+            shot_clip = shot_clip.with_effects(
+                [Loop(duration=shot_duration)]
+            ).subclipped(0, shot_duration)
+        else:
+            shot_clip = shot_clip.subclipped(0, shot_duration)
+        shot_clips.append(shot_clip)
+
+    result = concatenate_videoclips(shot_clips, method="chain")
+    result = result.with_duration(duration)
+
+    # Attach the original soundtrack, trimmed or looped to the target duration.
+    if audio.duration > duration:
+        soundtrack = audio.subclipped(0, duration)
+    elif audio.duration < duration:
+        soundtrack = audio.with_effects([AudioLoop(duration=duration)])
+    else:
+        soundtrack = audio
+    result = result.with_audio(soundtrack)
+
+    return cut_times, result

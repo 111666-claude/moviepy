@@ -20,7 +20,8 @@ moviepy.audio.tools.cuts
 
    .. autosummary::
       :toctree:
-   
+
+      find_audio_onsets
       find_audio_period
    
    
