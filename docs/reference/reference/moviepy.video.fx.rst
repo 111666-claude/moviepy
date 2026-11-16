@@ -126,6 +126,9 @@ moviepy.video.fx
    moviepy.video.fx.SlideOut
 
 
+   moviepy.video.fx.Stabilize
+
+
    moviepy.video.fx.SuperSample
 
 

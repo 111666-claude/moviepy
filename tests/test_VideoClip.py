@@ -472,5 +472,28 @@ def test_matmul(util):
     assert result == target
 
 
+def test_transform_frame_filter():
+    """``transform`` maps frames through a (get_frame, t) filter while keeping
+    the duration and applying the same filter to the mask."""
+    clip = BitmapClip([["RGB", "BRG"]], fps=1)
+    transformed = clip.transform(
+        lambda get_frame, t: get_frame(t)[:, 1:], apply_to=["mask"]
+    )
+
+    # The first column of every frame is removed by the filter.
+    target = BitmapClip([["GB", "RG"]], fps=1)
+    assert transformed == target
+    assert transformed.duration == clip.duration
+
+
+def test_transform_keep_duration_false():
+    """When ``keep_duration`` is False the transformed clip loses its
+    duration and end attributes."""
+    clip = BitmapClip([["RGB"]], fps=1)
+    transformed = clip.transform(lambda get_frame, t: get_frame(t), keep_duration=False)
+    assert transformed.duration is None
+    assert transformed.end is None
+
+
 if __name__ == "__main__":
     pytest.main()

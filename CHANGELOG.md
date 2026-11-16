@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `vfx.Stabilize` effect: trajectory-based translation stabilization that smooths a measured 2D camera path, counter-translates every frame and returns a fixed-size clip with the actual crop margins
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)
