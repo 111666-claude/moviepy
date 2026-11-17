@@ -45,6 +45,9 @@ moviepy.audio.fx
    moviepy.audio.fx.AudioLoop
 
 
+   moviepy.audio.fx.AudioLoudnessNormalize
+
+
    moviepy.audio.fx.AudioNormalize
 
 

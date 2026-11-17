@@ -20,6 +20,8 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `afx.AudioLoudnessNormalize` effect: ITU-R BS.1770-4 / EBU R128 integrated loudness measurement with a LUFS target and a true peak ceiling, processed in blocks for clips of any length
+- New `afx.measure_loudness` helper returning integrated loudness, true peak, sample peak and analyzed duration
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)
