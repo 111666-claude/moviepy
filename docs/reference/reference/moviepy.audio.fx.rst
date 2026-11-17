@@ -35,6 +35,7 @@ moviepy.audio.fx
 
    moviepy.audio.fx.AudioDelay
 
+   moviepy.audio.fx.AudioDuck
 
    moviepy.audio.fx.AudioFadeIn
 

@@ -3,6 +3,7 @@
 # import every video fx function
 
 from moviepy.audio.fx.AudioDelay import AudioDelay
+from moviepy.audio.fx.AudioDuck import AudioDuck
 from moviepy.audio.fx.AudioFadeIn import AudioFadeIn
 from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 from moviepy.audio.fx.AudioLoop import AudioLoop
@@ -13,6 +14,7 @@ from moviepy.audio.fx.MultiplyVolume import MultiplyVolume
 
 __all__ = (
     "AudioDelay",
+    "AudioDuck",
     "AudioFadeIn",
     "AudioFadeOut",
     "AudioLoop",

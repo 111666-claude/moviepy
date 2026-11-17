@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `afx.AudioDuck` effect that automatically lowers a music clip while a voice-over clip is playing, with configurable `target_gain`, `threshold`, `attack`, `release` and `analysis_window`
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)
