@@ -19,7 +19,9 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 - Fix incorrect handling of lines with a format different from "key: value" during FFmpeg infos parsing (see #2311, #1860, #2418, #2470)
 
 ### Added
-- Possibility to select audio track when reading a file (#2429)
+- Possibility to select audio track when reading a video file (#2429)
+- New `vfx.Timecode` effect burning a frame-accurate `HH:MM:SS:FF` SMPTE
+  timecode, with integer and 29.97/59.94 drop-frame frame rates
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)

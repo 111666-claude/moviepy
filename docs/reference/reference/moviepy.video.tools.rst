@@ -48,3 +48,6 @@ moviepy.video.tools
    moviepy.video.tools.subtitles
 
 
+   moviepy.video.tools.timecode
+
+

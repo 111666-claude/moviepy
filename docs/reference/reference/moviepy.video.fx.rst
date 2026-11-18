@@ -129,6 +129,9 @@ moviepy.video.fx
    moviepy.video.fx.SuperSample
 
 
+   moviepy.video.fx.Timecode
+
+
    moviepy.video.fx.TimeMirror
 
 

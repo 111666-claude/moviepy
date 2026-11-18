@@ -34,6 +34,7 @@ from moviepy.video.fx.Scroll import Scroll
 from moviepy.video.fx.SlideIn import SlideIn
 from moviepy.video.fx.SlideOut import SlideOut
 from moviepy.video.fx.SuperSample import SuperSample
+from moviepy.video.fx.Timecode import Timecode
 from moviepy.video.fx.TimeMirror import TimeMirror
 from moviepy.video.fx.TimeSymmetrize import TimeSymmetrize
 
@@ -71,6 +72,7 @@ __all__ = (
     "SlideIn",
     "SlideOut",
     "SuperSample",
+    "Timecode",
     "TimeMirror",
     "TimeSymmetrize",
 )
