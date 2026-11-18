@@ -1046,6 +1046,180 @@ def test_supersample():
     pass
 
 
+def _two_color_clip(fps=2, duration=1.0, color_a=(0, 0, 0), color_b=(200, 100, 50)):
+    """Clip of solid-color frames: ``color_a`` on even source frames,
+    ``color_b`` on odd ones (frame ``k`` covers ``[k/fps, (k+1)/fps)``).
+    """
+    color_a = np.array(color_a, dtype="uint8")
+    color_b = np.array(color_b, dtype="uint8")
+
+    def frame_function(t):
+        color = color_a if int(t * fps) % 2 == 0 else color_b
+        frame = np.empty((4, 4, 3), dtype="uint8")
+        frame[:] = color
+        return frame
+
+    return VideoClip(frame_function=frame_function, duration=duration).with_fps(fps)
+
+
+def test_resample_fps_two_color_blend():
+    # 2 fps -> 4 fps: source frame 0 is color A, frame 1 is color B
+    clip = _two_color_clip(fps=2, duration=1.0)
+    resampled = clip.with_effects([vfx.ResampleFPS(4)])
+
+    assert resampled.fps == 4
+    assert resampled.duration == clip.duration
+    # frame count follows the target fps
+    assert resampled.n_frames == 4
+    assert len(list(resampled.iter_frames())) == 4
+
+    # first frame is an exact copy of source frame 0
+    assert np.array_equal(resampled.get_frame(0)[0, 0], (0, 0, 0))
+    # halfway between source frames 0 and 1: linear blend with w=0.5
+    assert np.array_equal(resampled.get_frame(0.25)[0, 0], (100, 50, 25))
+    # target frame landing exactly on source frame 1
+    assert np.array_equal(resampled.get_frame(0.5)[0, 0], (200, 100, 50))
+    # last frame is clamped to the last source frame
+    assert np.array_equal(resampled.get_frame(0.75)[0, 0], (200, 100, 50))
+
+
+def test_resample_fps_moving_stripe():
+    # White 1px stripe moving right by 1 pixel per source frame
+    fps = 4
+
+    def frame_function(t):
+        frame = np.zeros((2, 8, 3), dtype="uint8")
+        column = int(t * fps) + 1
+        frame[:, column] = 255
+        return frame
+
+    clip = VideoClip(frame_function=frame_function, duration=1.0).with_fps(fps)
+    resampled = clip.with_effects([vfx.ResampleFPS(8)])
+
+    # t=0.125 lies halfway between source frames 0 (stripe at column 1)
+    # and 1 (stripe at column 2): both columns blend to half intensity
+    middle = resampled.get_frame(0.125)
+    assert middle[0, 0, 0] == 0
+    assert middle[0, 1, 0] == 128
+    assert middle[0, 2, 0] == 128
+    assert middle[0, 3, 0] == 0
+    # quarter of the way: 0.75 * frame0 + 0.25 * frame1
+    quarter = resampled.get_frame(0.0625)
+    assert quarter[0, 1, 0] == 191
+    assert quarter[0, 2, 0] == 64
+
+
+def test_resample_fps_non_integer_ratio():
+    # 24 fps -> 60 fps (ratio 2.5)
+    clip = _two_color_clip(fps=24, duration=1.0)
+    resampled = clip.with_effects([vfx.ResampleFPS(60)])
+
+    assert resampled.n_frames == 60
+    # t=1/60 -> position 0.4 in source frames: 0.6 * A + 0.4 * B
+    assert np.array_equal(resampled.get_frame(1 / 60)[0, 0], (80, 40, 20))
+    # t=2/60 -> position 0.8: 0.2 * A + 0.8 * B
+    assert np.array_equal(resampled.get_frame(2 / 60)[0, 0], (160, 80, 40))
+
+
+def test_resample_fps_no_blend_matches_with_fps():
+    clip = _two_color_clip(fps=2, duration=1.0)
+    resampled = clip.with_effects([vfx.ResampleFPS(4, blend=False)])
+    duplicated = clip.with_fps(4)
+
+    for t in np.arange(0, 1.0, 0.25):
+        assert np.array_equal(resampled.get_frame(t), duplicated.get_frame(t))
+    # without blending, t=0.25 still shows source frame 0 (duplication)
+    assert np.array_equal(resampled.get_frame(0.25)[0, 0], (0, 0, 0))
+
+
+def test_resample_fps_mask_uses_same_weights():
+    clip = _two_color_clip(fps=2, duration=1.0)
+
+    def mask_frame_function(t):
+        return np.full((4, 4), float(int(t * 2) % 2))
+
+    mask = VideoClip(
+        frame_function=mask_frame_function, is_mask=True, duration=1.0
+    ).with_fps(2)
+    clip = clip.with_mask(mask)
+
+    resampled = clip.with_effects([vfx.ResampleFPS(4)])
+
+    assert resampled.mask is not None
+    assert resampled.mask.fps == 4
+    assert np.array_equal(resampled.mask.get_frame(0), np.zeros((4, 4)))
+    assert np.allclose(resampled.mask.get_frame(0.25), 0.5)
+    assert np.allclose(resampled.mask.get_frame(0.5), 1.0)
+
+
+def test_resample_fps_preserves_audio_duration_and_start():
+    clip = _two_color_clip(fps=2, duration=1.0)
+    audio = AudioArrayClip(np.zeros((100, 2)), fps=44100).with_duration(1.0)
+    clip = clip.with_audio(audio).with_start(2.0)
+
+    resampled = clip.with_effects([vfx.ResampleFPS(4)])
+
+    assert resampled.duration == 1.0
+    assert resampled.start == 2.0
+    assert resampled.audio is not None
+    assert resampled.audio.duration == 1.0
+
+
+def test_resample_fps_random_access_matches_sequential():
+    clip = _two_color_clip(fps=2, duration=1.0)
+    resampled = clip.with_effects([vfx.ResampleFPS(4)])
+
+    times = [0.75, 0.0, 0.5, 0.25]
+    shuffled = [resampled.get_frame(t) for t in times]
+    sequential = [resampled.get_frame(t) for t in sorted(times)]
+    for t, frame in zip(sorted(times), sequential):
+        assert np.array_equal(frame, shuffled[times.index(t)])
+
+
+def test_resample_fps_without_source_fps_raises():
+    clip = VideoClip(
+        frame_function=lambda t: np.zeros((2, 2, 3), dtype="uint8"), duration=1.0
+    )
+    with pytest.raises(ValueError, match="fps"):
+        clip.with_effects([vfx.ResampleFPS(4)])
+
+
+@pytest.mark.parametrize("fps", [0, -3, None, "60", float("inf"), float("nan"), True])
+def test_resample_fps_invalid_target_fps(fps):
+    clip = _two_color_clip(fps=2, duration=1.0)
+    with pytest.raises(ValueError, match="fps"):
+        clip.with_effects([vfx.ResampleFPS(fps)])
+
+
+def test_resample_fps_single_frame_clip():
+    clip = ImageClip(np.full((2, 2, 3), 77, dtype="uint8"), duration=1.0).with_fps(1)
+    resampled = clip.with_effects([vfx.ResampleFPS(10)])
+
+    assert resampled.n_frames == 10
+    for t in np.arange(0, 1.0, 0.1):
+        assert np.array_equal(resampled.get_frame(t), np.full((2, 2, 3), 77))
+
+
+def test_resample_fps_variable_size_frames_falls_back_to_nearest():
+    def frame_function(t):
+        k = int(t * 2)
+        return np.full((2, 2 + k, 3), k, dtype="uint8")
+
+    clip = VideoClip(
+        frame_function=frame_function, duration=1.0, has_constant_size=False
+    ).with_fps(2)
+    resampled = clip.with_effects([vfx.ResampleFPS(8)])
+
+    # t=0.125 -> weight 0.25 between frames 0 and 1: nearest is frame 0
+    frame = resampled.get_frame(0.125)
+    assert frame.shape == (2, 2, 3)
+    assert (frame == 0).all()
+    # t=0.375 -> weight 0.75: nearest is frame 1
+    frame = resampled.get_frame(0.375)
+    assert frame.shape == (2, 3, 3)
+    assert (frame == 1).all()
+
+
 def test_time_mirror():
     clip = BitmapClip([["AA", "AA"], ["BB", "BB"], ["CC", "CC"]], fps=1)
 

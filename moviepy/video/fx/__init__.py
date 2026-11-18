@@ -28,6 +28,7 @@ from moviepy.video.fx.MirrorY import MirrorY
 from moviepy.video.fx.MultiplyColor import MultiplyColor
 from moviepy.video.fx.MultiplySpeed import MultiplySpeed
 from moviepy.video.fx.Painting import Painting
+from moviepy.video.fx.ResampleFPS import ResampleFPS
 from moviepy.video.fx.Resize import Resize
 from moviepy.video.fx.Rotate import Rotate
 from moviepy.video.fx.Scroll import Scroll
@@ -65,6 +66,7 @@ __all__ = (
     "MultiplyColor",
     "MultiplySpeed",
     "Painting",
+    "ResampleFPS",
     "Resize",
     "Rotate",
     "Scroll",

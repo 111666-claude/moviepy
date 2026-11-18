@@ -111,6 +111,9 @@ moviepy.video.fx
    moviepy.video.fx.Painting
 
 
+   moviepy.video.fx.ResampleFPS
+
+
    moviepy.video.fx.Resize
 
 
