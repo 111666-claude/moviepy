@@ -8,6 +8,7 @@ from moviepy.video.fx.Blink import Blink
 from moviepy.video.fx.Crop import Crop
 from moviepy.video.fx.CrossFadeIn import CrossFadeIn
 from moviepy.video.fx.CrossFadeOut import CrossFadeOut
+from moviepy.video.fx.Deflicker import Deflicker
 from moviepy.video.fx.EvenSize import EvenSize
 from moviepy.video.fx.FadeIn import FadeIn
 from moviepy.video.fx.FadeOut import FadeOut
@@ -45,6 +46,7 @@ __all__ = (
     "Crop",
     "CrossFadeIn",
     "CrossFadeOut",
+    "Deflicker",
     "EvenSize",
     "FadeIn",
     "FadeOut",

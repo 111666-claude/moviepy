@@ -51,6 +51,9 @@ moviepy.video.fx
    moviepy.video.fx.CrossFadeOut
 
 
+   moviepy.video.fx.Deflicker
+
+
    moviepy.video.fx.EvenSize
 
 

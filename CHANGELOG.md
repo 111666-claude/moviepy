@@ -20,6 +20,7 @@ This mean you need to specifically set `bg_color=None` if you want to generate a
 
 ### Added
 - Possibility to select audio track when reading a file (#2429)
+- New `vfx.Deflicker` effect removing time-lapse exposure flicker by pulling each frame's mean brightness toward the median brightness of a configurable temporal window, with adjustable window radius, maximum correction gain and scene cut detection
 
 ### Changed 
 - Rewrite FFmpegInfosParser to use indentation and block extractions instead of a state machine (PR #2470)
